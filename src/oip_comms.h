@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <queue>
+#include <mutex>
 
 #include "oip_blocking_queue.h"
 
@@ -49,6 +50,9 @@ private:
 		double time;
 		size_t init_count;
 		bool init_count_emitted;
+		
+		double max_cycle_time_ms;
+		uint64_t skipped_cycles;
 
 		String protocol;
 
@@ -68,6 +72,7 @@ private:
 
 	};
 	std::map<String, TagGroup> tag_groups;
+	std::mutex tag_groups_mutex;
 
 	struct WriteRequest {
 		uint8_t instruction;
@@ -76,10 +81,15 @@ private:
 		Variant value;
 	};
 	std::queue<WriteRequest> write_queue;
+	std::mutex write_queue_mutex;
+	static const size_t MAX_WRITE_QUEUE_SIZE = 1000;
 
 	Ref<Thread> work_thread;
 	bool work_thread_running = true;
 
+	Ref<Thread> scheduler_thread;
+	bool scheduler_thread_running = true;
+	
 	Ref<Thread> watchdog_thread;
 	bool watchdog_thread_running = true;
 
@@ -94,8 +104,9 @@ private:
 
 	bool enable_log = false;
 
-	void watchdog();
+	void scheduler_loop();
 	void process_work();
+	void watchdog();
 
 	void process_tag_group(const String &tag_group_name);
 	void process_plc_tag_group(const String &tag_group_name);
@@ -114,12 +125,12 @@ private:
 
 	void flush_all_writes();
 	void flush_one_write();
+	void queue_write_bounded(const WriteRequest &write_req);
 
-	// process both PLC and OPC UA writes
 	void process_write(const WriteRequest &write_req);
 
-	// process individual PLC read
-	bool process_plc_read(PlcTag &tag, const String &tag_name);
+	bool process_plc_read_nonblocking(PlcTag &tag, const String &tag_name);
+	bool process_plc_write_nonblocking(int32_t tag_pointer, const String &tag_name);
 
 	void opc_write(const String &tag_group_name, const String &tag_path);
 
@@ -161,6 +172,10 @@ public:
 	String get_comms_error();
 
 	Array get_tag_groups();
+	
+	// Version information
+	String get_version();
+	String get_build_info();
 
 #define OIP_DECLARE_FUNC(a, b)                                          \
 	b read_##a(const String p_tag_group_name, const String p_tag_name); \

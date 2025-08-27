@@ -39,7 +39,11 @@ env.Append(CPPPATH=["src/"])
 env.Append(LIBPATH=["lib/"])
 env.Append(LIBS=["plctag", "open62541"])
 if env["platform"] == "windows":
-    env.Append(CXXFLAGS=["/MT"])
+    # Check if we're using MSVC or MinGW
+    if "msvc" in env.get("CC", "").lower() or "cl.exe" in env.get("CC", ""):
+        env.Append(CXXFLAGS=["/MT"])
+    else:
+        env.Append(LINKFLAGS=["-static-libgcc", "-static-libstdc++"])
 else:
     env.Append(LINKFLAGS=["-static"])
 sources = Glob("src/*.cpp")

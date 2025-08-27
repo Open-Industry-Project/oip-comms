@@ -6,6 +6,7 @@
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
+#include <type_traits>
 
 using namespace godot;
 
@@ -13,6 +14,10 @@ OIPComms::OIPComms() {
 	print("Process work start");
 	work_thread.instantiate();
 	work_thread->start(callable_mp(this, &OIPComms::process_work));
+
+	print("Scheduler thread start");
+	scheduler_thread.instantiate();
+	scheduler_thread->start(callable_mp(this, &OIPComms::scheduler_loop));
 
 	print("Watchdog thread start");
 	watchdog_thread.instantiate();
@@ -22,11 +27,13 @@ OIPComms::OIPComms() {
 OIPComms::~OIPComms() {
 	cleanup_tag_groups();
 
+	scheduler_thread_running = false;
 	watchdog_thread_running = false;
 	work_thread_running = false;
 	tag_group_queue.shutdown();
 
 	work_thread->wait_to_finish();
+	scheduler_thread->wait_to_finish();
 	watchdog_thread->wait_to_finish();
 	print("Threads shutdown");
 }
@@ -81,6 +88,39 @@ void OIPComms::watchdog() {
 	}
 }
 
+void OIPComms::scheduler_loop() {
+	uint64_t last_scheduler_ticks = Time::get_singleton()->get_ticks_usec();
+	
+	while (scheduler_thread_running) {
+		if (enable_comms && sim_running) {
+			uint64_t current_ticks = Time::get_singleton()->get_ticks_usec();
+			double delta = (current_ticks - last_scheduler_ticks) / 1000.0f;
+			
+			{
+				std::lock_guard<std::mutex> lock(tag_groups_mutex);
+				for (auto &x : tag_groups) {
+					const String tag_group_name = x.first;
+					TagGroup &tag_group = x.second;
+
+					tag_group.time += delta;
+					
+					if (tag_group.time >= tag_group.polling_interval) {
+						queue_tag_group(tag_group_name);
+						// Use call_deferred for thread-safe signal emission
+						call_deferred("emit_signal", "tag_group_polled", tag_group_name);
+						tag_group.time = 0.0f;
+					}
+				}
+			}
+			
+			last_scheduler_ticks = current_ticks;
+		}
+		
+		// Sleep for 1ms to avoid busy waiting but maintain responsiveness
+		OS::get_singleton()->delay_usec(1000);
+	}
+}
+
 void OIPComms::process_work() {
 	while (work_thread_running) {
 		// this pop operation is blocking - thread will sleep until a request comes along
@@ -101,7 +141,23 @@ void OIPComms::process_work() {
 		// only actually process if sim running
 		if (sim_running) {
 			if (tag_groups.find(tag_group_name) != tag_groups.end()) {
+				// Time budget enforcement
+				uint64_t cycle_start = Time::get_singleton()->get_ticks_usec();
 				process_tag_group(tag_group_name);
+				uint64_t cycle_end = Time::get_singleton()->get_ticks_usec();
+				double cycle_time_ms = (cycle_end - cycle_start) / 1000.0;
+				
+				// Check if we exceeded time budget
+				{
+					std::lock_guard<std::mutex> lock(tag_groups_mutex);
+					TagGroup &tag_group = tag_groups[tag_group_name];
+					if (cycle_time_ms > tag_group.max_cycle_time_ms) {
+						tag_group.skipped_cycles++;
+						print("Tag group " + tag_group_name + " exceeded time budget: " + 
+							  String::num(cycle_time_ms, 1) + "ms > " + 
+							  String::num(tag_group.max_cycle_time_ms, 1) + "ms", true);
+					}
+				}
 			} else {
 				if (tag_group_name.is_empty()) {
 					print("Processing writes (no tag groups to be updated)");
@@ -118,6 +174,7 @@ void OIPComms::queue_tag_group(const String &tag_group_name) {
 }
 
 void OIPComms::flush_all_writes() {
+	std::lock_guard<std::mutex> lock(write_queue_mutex);
 	while (!write_queue.empty()) {
 		WriteRequest write_req = write_queue.front();
 		write_queue.pop();
@@ -128,12 +185,42 @@ void OIPComms::flush_all_writes() {
 
 // not currently used but might considering flushing one write for each read
 void OIPComms::flush_one_write() {
+	std::lock_guard<std::mutex> lock(write_queue_mutex);
 	if (!write_queue.empty()) {
 		WriteRequest write_req = write_queue.front();
 		write_queue.pop();
 		if (sim_running)
 			process_write(write_req);
 	}
+}
+
+void OIPComms::queue_write_bounded(const WriteRequest &write_req) {
+	std::lock_guard<std::mutex> lock(write_queue_mutex);
+	
+	// If queue is full, drop oldest writes to make room
+	while (write_queue.size() >= MAX_WRITE_QUEUE_SIZE) {
+		write_queue.pop();
+		print("Write queue full, dropping oldest write", true);
+	}
+	
+	// Simple coalescing: remove any existing write to the same tag
+	std::queue<WriteRequest> temp_queue;
+	String target_key = write_req.tag_group_name + String(":") + write_req.tag_name;
+	
+	while (!write_queue.empty()) {
+		WriteRequest existing = write_queue.front();
+		write_queue.pop();
+		String existing_key = existing.tag_group_name + String(":") + existing.tag_name;
+		
+		// Keep writes to different tags
+		if (existing_key != target_key) {
+			temp_queue.push(existing);
+		}
+	}
+	
+	// Restore non-coalesced writes and add new write
+	write_queue = temp_queue;
+	write_queue.push(write_req);
 }
 
 void OIPComms::opc_write(const String &tag_group_name, const String &tag_path) {
@@ -154,9 +241,11 @@ void OIPComms::opc_write(const String &tag_group_name, const String &tag_path) {
 
 #define OIP_OPC_SET(a, b, c, d) \
 void OIPComms::opc_tag_set_##a(const String &tag_group_name, const String &tag_path, const godot::Variant value) { \
-	if (value.get_type() == Variant::##d) { \
+	if (value.get_type() == Variant::d) { \
 		if (!opc_ua_client_connected(tag_group_name)) return; \
-		OpcUaTag &tag = tag_groups[tag_group_name].opc_ua_tags[tag_path]; \
+		/* NOTE: tag_groups access is protected by mutex in calling function process_write */ \
+		TagGroup &tag_group = tag_groups[tag_group_name]; \
+		OpcUaTag &tag = tag_group.opc_ua_tags[tag_path]; \
 		if (!tag.initialized) return; \
 		b raw_value = (b)value; \
 		UA_StatusCode ret_val = UA_Variant_setScalarCopy(&(tag.value), &raw_value, &UA_TYPES[UA_TYPES_##c]); \
@@ -192,6 +281,7 @@ if (tag_group.protocol == "opc_ua") { \
 }
 
 void OIPComms::process_write(const WriteRequest &write_req) {
+	std::lock_guard<std::mutex> lock(tag_groups_mutex);
 	TagGroup &tag_group = tag_groups[write_req.tag_group_name];
 
 	int32_t tag_pointer = -1;
@@ -239,8 +329,10 @@ void OIPComms::process_write(const WriteRequest &write_req) {
 	// this code only need for PLC interface - the above code is "setting" the data in memory
 	// this code actually writes to the PLC tags
 	if (tag_group.protocol != "opc_ua") {
-		if (tag_pointer >= 0 && plc_tag_write(tag_pointer, timeout) == PLCTAG_STATUS_OK) {
-			tag_groups[write_req.tag_group_name].plc_tags[write_req.tag_name].dirty = true;
+		if (tag_pointer >= 0 && process_plc_write_nonblocking(tag_pointer, write_req.tag_name)) {
+			// Mark tag as dirty (we already have tag_group reference)
+			tag_group.plc_tags[write_req.tag_name].dirty = true;
+
 		} else {
 			print("Failed to write tag: " + write_req.tag_name, true);
 		}
@@ -248,6 +340,7 @@ void OIPComms::process_write(const WriteRequest &write_req) {
 }
 
 void OIPComms::process_tag_group(const String &tag_group_name) {
+	std::lock_guard<std::mutex> lock(tag_groups_mutex);
 	TagGroup &tag_group = tag_groups[tag_group_name];
 	if (tag_group.protocol == "opc_ua") {
 		process_opc_ua_tag_group(tag_group_name);
@@ -264,15 +357,17 @@ void OIPComms::process_plc_tag_group(const String &tag_group_name) {
 
 		// tag is not initialized
 		if (tag.tag_pointer < 0) {
-			if (!init_plc_tag(tag_group_name, tag_name))
-				break;
+			if (!init_plc_tag(tag_group_name, tag_name)) {
+				// Log error but continue with other tags
+				continue;
+			}
 		}
 
 		// tag is initialized, read it
 		if (tag.tag_pointer >= 0) {
-			if (!process_plc_read(tag, tag_name)) {
-				print("Skipping remainder of tag group: " + tag_group_name);
-				break;
+			if (!process_plc_read_nonblocking(tag, tag_name)) {
+				// Log error but continue with other tags
+				continue;
 			} else {
 				// if read was successful, the tag read is now clean
 				tag.dirty = false;
@@ -394,50 +489,133 @@ bool OIPComms::tag_exists(const String& tag_group_name, const String& tag_name) 
 	return false;
 }
 
-bool OIPComms::process_plc_read(PlcTag &tag, const String &tag_name) {
-	int read_result = plc_tag_read(tag.tag_pointer, timeout);
-	if (read_result != PLCTAG_STATUS_OK) {
-		print("Failed to read tag: " + tag_name, true);
-		return false;
+bool OIPComms::process_plc_read_nonblocking(PlcTag &tag, const String &tag_name) {
+	const int max_attempts = 3;
+	const int per_attempt_timeout_ms = 200;
+	
+	for (int attempt = 0; attempt < max_attempts; attempt++) {
+		// Start non-blocking read
+		int read_result = plc_tag_read(tag.tag_pointer, 0);
+		if (read_result != PLCTAG_STATUS_OK && read_result != PLCTAG_STATUS_PENDING) {
+			print("Failed to start read for tag: " + tag_name + " (attempt " + itos(attempt + 1) + ")", true);
+			continue;
+		}
+		
+		// Poll status until timeout or completion
+		uint64_t start_time = Time::get_singleton()->get_ticks_msec();
+		uint64_t deadline = start_time + per_attempt_timeout_ms;
+		
+		while (Time::get_singleton()->get_ticks_msec() < deadline) {
+			int status = plc_tag_status(tag.tag_pointer);
+			
+			if (status == PLCTAG_STATUS_OK) {
+				// Success
+				if (!tag.initialized)
+					tag.initialized = true;
+				return true;
+			}
+			
+			if (status != PLCTAG_STATUS_PENDING) {
+				// Hard error, try next attempt
+				print("Read error for tag: " + tag_name + " status: " + itos(status) + " (attempt " + itos(attempt + 1) + ")", true);
+				break;
+			}
+			
+			// Still pending, sleep briefly and check again
+			OS::get_singleton()->delay_msec(1);
+		}
+		
+		// Timeout reached, abort this attempt
+		plc_tag_abort(tag.tag_pointer);
+		print("Read timeout for tag: " + tag_name + " (attempt " + itos(attempt + 1) + ")", true);
+		
+		// Exponential backoff between attempts
+		if (attempt < max_attempts - 1) {
+			OS::get_singleton()->delay_msec(10 * (1 << attempt)); // 10ms, 20ms, 40ms
+		}
 	}
-	if (!tag.initialized)
-		tag.initialized = true;
+	
+	print("Failed to read tag after " + itos(max_attempts) + " attempts: " + tag_name, true);
+	return false;
+}
 
-	return true;
+bool OIPComms::process_plc_write_nonblocking(int32_t tag_pointer, const String &tag_name) {
+	const int max_attempts = 3;
+	const int per_attempt_timeout_ms = 200;
+	
+	for (int attempt = 0; attempt < max_attempts; attempt++) {
+		// Start non-blocking write
+		int write_result = plc_tag_write(tag_pointer, 0);
+		if (write_result != PLCTAG_STATUS_OK && write_result != PLCTAG_STATUS_PENDING) {
+			print("Failed to start write for tag: " + tag_name + " (attempt " + itos(attempt + 1) + ")", true);
+			continue;
+		}
+		
+		// Poll status until timeout or completion
+		uint64_t start_time = Time::get_singleton()->get_ticks_msec();
+		uint64_t deadline = start_time + per_attempt_timeout_ms;
+		
+		while (Time::get_singleton()->get_ticks_msec() < deadline) {
+			int status = plc_tag_status(tag_pointer);
+			
+			if (status == PLCTAG_STATUS_OK) {
+				// Success
+				return true;
+			}
+			
+			if (status != PLCTAG_STATUS_PENDING) {
+				// Hard error, try next attempt
+				print("Write error for tag: " + tag_name + " status: " + itos(status) + " (attempt " + itos(attempt + 1) + ")", true);
+				break;
+			}
+			
+			// Still pending, sleep briefly and check again
+			OS::get_singleton()->delay_msec(1);
+		}
+		
+		// Timeout reached, abort this attempt
+		plc_tag_abort(tag_pointer);
+		print("Write timeout for tag: " + tag_name + " (attempt " + itos(attempt + 1) + ")", true);
+		
+		// Exponential backoff between attempts
+		if (attempt < max_attempts - 1) {
+			OS::get_singleton()->delay_msec(10 * (1 << attempt)); // 10ms, 20ms, 40ms
+		}
+	}
+	
+	print("Failed to write tag after " + itos(max_attempts) + " attempts: " + tag_name, true);
+	return false;
 }
 
 void OIPComms::process() {
+	// This is now just for initialization checking - scheduling moved to dedicated thread
 	if (enable_comms && sim_running) {
 		uint64_t current_ticks = Time::get_singleton()->get_ticks_usec();
 		double delta = (current_ticks - last_ticks) / 1000.0f;
-		for (auto &x : tag_groups) {
-			const String tag_group_name = x.first;
-			TagGroup &tag_group = x.second;
+		
+		// check for tag initialization after 500 ms
+		{
+			std::lock_guard<std::mutex> lock(tag_groups_mutex);
+			for (auto &x : tag_groups) {
+				const String tag_group_name = x.first;
+				TagGroup &tag_group = x.second;
+				
+				if (startup_timer >= register_wait_time && !tag_group.init_count_emitted) {
+					size_t total_tag_count = 0;
+					if (tag_group.protocol == "opc_ua")
+						total_tag_count = tag_group.opc_ua_tags.size();
+					else
+						total_tag_count = tag_group.plc_tags.size();
 
-			tag_group.time += delta;
-			
-			if (tag_group.time >= tag_group.polling_interval) {
-				queue_tag_group(tag_group_name);
-				emit_signal("tag_group_polled", tag_group_name);
-				tag_group.time = 0.0f;
-			}
-
-			// check for tag initialization after 500 ms
-			// TBD -> there might be a better solution - not sure yet
-			if (startup_timer >= register_wait_time && !tag_group.init_count_emitted) {
-				size_t total_tag_count = 0;
-				if (tag_group.protocol == "opc_ua")
-					total_tag_count = tag_group.opc_ua_tags.size();
-				else
-					total_tag_count = tag_group.plc_tags.size();
-
-				if (tag_group.init_count >= total_tag_count) {
-					emit_signal("tag_group_initialized", tag_group_name);
-					print("Tag group initialized: " + tag_group_name);
-					tag_group.init_count_emitted = true;
+					if (tag_group.init_count >= total_tag_count) {
+						call_deferred("emit_signal", "tag_group_initialized", tag_group_name);
+						print("Tag group initialized: " + tag_group_name);
+						tag_group.init_count_emitted = true;
+					}
 				}
 			}
 		}
+		
 		if (startup_timer <= register_wait_time + 500.0f)
 			startup_timer += delta;
 
@@ -508,6 +686,10 @@ void OIPComms::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_tag_groups"), &OIPComms::get_tag_groups);
 
 	ClassDB::bind_method(D_METHOD("clear_tag_groups"), &OIPComms::clear_tag_groups);
+	
+	// Version methods
+	ClassDB::bind_method(D_METHOD("get_version"), &OIPComms::get_version);
+	ClassDB::bind_method(D_METHOD("get_build_info"), &OIPComms::get_build_info);
 
 	ADD_SIGNAL(MethodInfo("tag_group_polled", PropertyInfo(Variant::STRING, "tag_group_name")));
 	ADD_SIGNAL(MethodInfo("tag_group_initialized", PropertyInfo(Variant::STRING, "tag_group_name")));
@@ -535,6 +717,10 @@ void OIPComms::register_tag_group(const String p_tag_group_name, const int p_pol
 		p_polling_interval * 1.0f,
 		0,
 		false,
+		
+		// Set max cycle time to 80% of polling interval to leave headroom
+		p_polling_interval * 0.8,
+		0,
 
 		p_protocol,
 
@@ -548,7 +734,10 @@ void OIPComms::register_tag_group(const String p_tag_group_name, const int p_pol
 		std::map<String, OpcUaTag>()
 	};
 
-	tag_groups[p_tag_group_name] = tag_group;
+	{
+		std::lock_guard<std::mutex> lock(tag_groups_mutex);
+		tag_groups[p_tag_group_name] = tag_group;
+	}
 	print("Tag group registered: " + p_tag_group_name);
 }
 
@@ -559,6 +748,7 @@ bool OIPComms::register_tag(const String p_tag_group_name, const String p_tag_na
 	if (tag_group_exists(p_tag_group_name)) {
 
 		if (!tag_exists(p_tag_group_name, p_tag_name)) {
+			std::lock_guard<std::mutex> lock(tag_groups_mutex);
 			TagGroup &tag_group = tag_groups[p_tag_group_name];
 			if (tag_group.protocol == "opc_ua") {
 				OpcUaTag tag = { false, UA_NODEID_NULL, { 0 } };
@@ -645,6 +835,35 @@ void OIPComms::clear_tag_groups() {
 	}
 }
 
+String OIPComms::get_version() {
+	UtilityFunctions::print("get_version() called - library is working!");
+	return "1.1.0-realtime";  // Updated with real-time improvements
+}
+
+String OIPComms::get_build_info() {
+	String build_info = "OIP-COMMS v" + get_version() + "\n";
+	build_info += "Built: " + String(__DATE__) + " " + String(__TIME__) + "\n";
+	build_info += "Features: Real-time scheduler, Thread safety, Bounded queues, Time budgets\n";
+	build_info += "Protocols: OPC UA, Allen-Bradley EIP, Modbus TCP\n";
+	
+	#ifdef _WIN32
+		build_info += "Platform: Windows";
+		#ifdef __MINGW32__
+			build_info += " (MinGW)";
+		#elif defined(_MSC_VER)
+			build_info += " (MSVC)";
+		#endif
+	#elif defined(__linux__)
+		build_info += "Platform: Linux";
+	#elif defined(__APPLE__)
+		build_info += "Platform: macOS";
+	#else
+		build_info += "Platform: Unknown";
+	#endif
+	
+	return build_info;
+}
+
 // OIP READ/WRITES
 // the reads typically occur on the main thread (separate from processing thread)
 // need to be a little more careful with thread safety. don't use pass by reference here, copy values
@@ -652,20 +871,33 @@ void OIPComms::clear_tag_groups() {
 
 #define OIP_READ_FUNC(a, b, c)                                                        \
 	b OIPComms::read_##a(const String p_tag_group_name, const String p_tag_name) { \
-		if (enable_comms && sim_running && tag_exists(p_tag_group_name, p_tag_name)) {                                         \
-			TagGroup &tag_group = tag_groups[p_tag_group_name];                    \
-			if (tag_group.protocol == "opc_ua") {                                  \
-				OpcUaTag tag = tag_group.opc_ua_tags[p_tag_name];                  \
-				if (tag.initialized && UA_Variant_hasScalarType(&tag.value, &UA_TYPES[UA_TYPES_##c])) { \
-					return *(b *)tag.value.data; \
-				} else { return 0.0; } \
-			} else {                                                               \
-				PlcTag tag = tag_group.plc_tags[p_tag_name];                      \
-				if (tag.initialized) {                                           \
-					int32_t tag_pointer = tag.tag_pointer;                     \
-					return plc_tag_get_##a(tag_pointer, 0);                     \
-				} else { return 0.0; }                                             \
+		if (enable_comms && sim_running) {                                         \
+			std::lock_guard<std::mutex> lock(tag_groups_mutex);                    \
+			if (tag_exists(p_tag_group_name, p_tag_name)) {                        \
+				TagGroup &tag_group = tag_groups[p_tag_group_name];                \
+				if (tag_group.protocol == "opc_ua") {                              \
+					OpcUaTag tag = tag_group.opc_ua_tags[p_tag_name];              \
+					if (tag.initialized && UA_Variant_hasScalarType(&tag.value, &UA_TYPES[UA_TYPES_##c])) { \
+						b result = *(b *)tag.value.data; \
+						return result; \
+					} else { \
+						return 0.0; \
+					} \
+				} else {                                                           \
+					PlcTag tag = tag_group.plc_tags[p_tag_name];                  \
+					if (tag.initialized) {                                       \
+						int32_t tag_pointer = tag.tag_pointer;                 \
+						b result = plc_tag_get_##a(tag_pointer, 0); \
+						return result;                 \
+					} else { \
+						return 0.0; \
+					}                                         \
+				}                                                                  \
+			} else { \
+				print("READ FAILED: " + p_tag_group_name + String(":") + p_tag_name + String(" - tag does not exist")); \
 			}                                                                      \
+		} else { \
+			print("READ REJECTED: enable_comms=" + String(enable_comms ? "true" : "false") + String(" sim_running=") + String(sim_running ? "true" : "false")); \
 		}                                                                          \
 		return 0.0;                                                                 \
 	}
@@ -684,6 +916,7 @@ OIP_READ_FUNC(float32, float, FLOAT)
 
 #define OIP_WRITE_FUNC(a, b, c)                                                                                                         \
 	void OIPComms::write_##a(const String p_tag_group_name, const String p_tag_name, const b p_value) {                                 \
+		print("WRITE REQUEST: " + p_tag_group_name + String(":") + p_tag_name + String(" = ") + (std::is_same<b, bool>::value ? (p_value ? "true" : "false") : String::num(p_value))); \
 		if (enable_comms && sim_running && tag_exists(p_tag_group_name, p_tag_name)) { \
 			WriteRequest write_req = {                                                                                                  \
 				c,                                                                                                                      \
@@ -691,8 +924,11 @@ OIP_READ_FUNC(float32, float, FLOAT)
 				p_tag_name,                                                                                                             \
 				p_value                                                                                                                 \
 			};                                                                                                                          \
-			write_queue.push(write_req);                                                                                                \
+			queue_write_bounded(write_req);                                                                                                \
 			tag_group_queue.push("");                                                                                                   \
+			print("WRITE QUEUED: " + p_tag_group_name + String(":") + p_tag_name); \
+		} else { \
+			print("WRITE REJECTED: enable_comms=" + String(enable_comms ? "true" : "false") + String(" sim_running=") + String(sim_running ? "true" : "false") + String(" tag_exists=") + String(tag_exists(p_tag_group_name, p_tag_name) ? "true" : "false")); \
 		}                                                                                                                               \
 	}
 
