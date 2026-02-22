@@ -152,7 +152,7 @@
 			<param index="2" name="elem_count" type="int" />
 			<description>
 			Register a tag to a [code]tag_group_name[/code]. The tag group must be registered prior to registering the tag.
-			[i]Note: [code]elem_count[/code] is not currently implemented. This will be future work if array reads/writes are needed.[/i]
+			[code]elem_count[/code] specifies how many elements to read. For single-register types (e.g. 16-bit integers), use [code]1[/code]. For types spanning multiple registers (e.g. [code]float32[/code] over Modbus TCP holding registers), use [code]2[/code] since a 32-bit value occupies two 16-bit registers.
 			</description>
 		</method>
 		<method name="register_tag_group">
@@ -163,13 +163,14 @@
 			<param index="3" name="gateway" type="String" />
 			<param index="4" name="path" type="String" />
 			<param index="5" name="cpu" type="String" />
+			<param index="6" name="byte_order" type="String" default="&quot;&quot;" />
 			<description>
 			Register a tag group. Valid values for [code]protocol[/code] are:
 			- [code]ab_eip[/code]
 			- [code]modbus_tcp[/code]
 			- [code]opc_ua[/code].
-			[code]gateway[/code], [code]path[/code] and [code]cpu[/code] are multi-use fields.
-			When the protocol is [code]ab_eip[/code] or [code]modbus_tcp[/code], the [code]gateway[/code] is the IP address of the target device (typically a PLC), the [code]path[/code] is the path (rack/slot) to a processor, and the [code]cpu[/code] may be one of the following values:
+			[b]When the protocol is [code]ab_eip[/code]:[/b]
+			[code]gateway[/code] is the IP address of the target device. [code]path[/code] is the rack/slot path to the processor (e.g. [code]"1,2"[/code]). [code]cpu[/code] may be one of the following values:
 			- [code]ControlLogix[/code]
 			- [code]PLC5[/code]
 			- [code]SLC500[/code]
@@ -177,7 +178,17 @@
 			- [code]Micro800[/code]
 			- [code]MicroLogix[/code]
 			- [code]Omron[/code]
-			When the protocol is [code]opc_ua[/code], the [code]gateway[/code] is the OPC UA server's "endpoint", and the [code]path[/code] field is the "namespace" (typically a number). [code]cpu[/code] is not used.
+			[b]When the protocol is [code]modbus_tcp[/code]:[/b]
+			[code]gateway[/code] is the IP address of the Modbus device. [code]path[/code] is the Modbus unit/slave ID as an integer string (e.g. [code]"1"[/code]). [code]cpu[/code] is not used and should be left empty ([code]""[/code]).
+			Tag names use the libplctag Modbus format: [code]hr[/code] for holding registers, [code]ir[/code] for input registers, [code]co[/code] for coils, [code]di[/code] for discrete inputs, followed by a 0-based register number (e.g. [code]"hr519"[/code]).
+			[b]When the protocol is [code]opc_ua[/code]:[/b]
+			[code]gateway[/code] is the OPC UA server's endpoint. [code]path[/code] is the namespace (typically a number). [code]cpu[/code] is not used.
+			[b][code]byte_order[/code][/b] (optional) controls how 32-bit values are interpreted. This is passed to libplctag as [code]float32_byte_order[/code] and [code]int32_byte_order[/code]. Common values:
+			- [code]"3210"[/code] — Big Endian (ABCD). Default for Modbus TCP.
+			- [code]"1032"[/code] — Word-swapped (CDAB). Common for Schneider PLCs.
+			- [code]"2301"[/code] — Byte-swapped (BADC).
+			- [code]"0123"[/code] — Little Endian (DCBA). Default for Allen-Bradley.
+			Leave empty ([code]""[/code]) to use libplctag defaults.
 			</description>
 		</method>
 		<method name="set_enable_comms">

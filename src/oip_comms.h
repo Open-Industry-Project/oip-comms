@@ -56,11 +56,17 @@ private:
 		// or the address of an OPC UA server endpoint, "opc.tcp://192.168.56.104:62541"
 		String gateway;
 
-		// path is a multi-purpose field. it is the rack/slot number of a PLC, "1,2"
+		// path is a multi-purpose field. it is the rack/slot number of a PLC, "1,2",
+		// the unit/slave ID for Modbus TCP, "1",
 		// or the namespace address of an OPC UA server, "1"
 		String path;
 
 		String cpu;
+
+		// libplctag byte order string for 32-bit types, e.g. "3210", "2301"
+		// only appended to the tag string when non-empty
+		String byte_order;
+
 		std::map<String, PlcTag> plc_tags;
 
 		UA_Client *client;
@@ -146,7 +152,7 @@ protected:
 	static void _bind_methods();
 
 public:
-	void register_tag_group(const String p_tag_group_name, const int p_polling_interval, const String p_protocol, const String p_gateway, const String p_path, const String p_cpu);
+	void register_tag_group(const String p_tag_group_name, const int p_polling_interval, const String p_protocol, const String p_gateway, const String p_path, const String p_cpu, const String p_byte_order = "");
 	bool register_tag(const String p_tag_group_name, const String p_tag_name, const int p_elem_count);
 
 	bool get_enable_comms();

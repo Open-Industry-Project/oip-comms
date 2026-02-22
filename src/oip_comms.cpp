@@ -285,9 +285,18 @@ bool OIPComms::init_plc_tag(const String &tag_group_name, const String &tag_name
 	TagGroup &tag_group = tag_groups[tag_group_name];
 	PlcTag &tag = tag_group.plc_tags[tag_name];
 
-	String group_tag_path = "protocol=" + tag_group.protocol + "&gateway=" + tag_group.gateway + "&path=" + tag_group.path + "&cpu=" + tag_group.cpu + "&elem_count=";
+	String tag_path = "protocol=" + tag_group.protocol + "&gateway=" + tag_group.gateway + "&path=" + tag_group.path;
 
-	String tag_path = group_tag_path + itos(tag.elem_count) + "&name=" + tag_name;
+	if (tag_group.protocol == "ab_eip")
+		tag_path += "&cpu=" + tag_group.cpu;
+
+	tag_path += "&elem_count=" + itos(tag.elem_count) + "&name=" + tag_name;
+
+	if (!tag_group.byte_order.is_empty()) {
+		tag_path += "&int32_byte_order=" + tag_group.byte_order;
+		tag_path += "&float32_byte_order=" + tag_group.byte_order;
+	}
+
 	tag.tag_pointer = plc_tag_create(tag_path.utf8().get_data(), timeout);
 
 	// failed to create tag
@@ -359,7 +368,7 @@ bool OIPComms::init_opc_ua_tag(const String &tag_group_name, const String &tag_p
 	UA_Variant_init(&tag.value);
 
 	if (tag_path.is_valid_int()) {
-		tag.node_id = UA_NODEID_NUMERIC((UA_UInt16)tag_group.path.to_int(), (UA_UInt32)tag_path.to_int);
+		tag.node_id = UA_NODEID_NUMERIC((UA_UInt16)tag_group.path.to_int(), (UA_UInt32)tag_path.to_int());
 	} else {
 		tag.node_id = UA_NODEID_STRING_ALLOC((UA_UInt16)tag_group.path.to_int(), tag_path.utf8().get_data());
 	}
@@ -471,7 +480,7 @@ void OIPComms::print(const Variant &message, bool error) {
 // --- GDSCRIPT BOUND FUNCTIONS
 
 void OIPComms::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("register_tag_group", "tag_group_name", "polling_interval", "protocol", "gateway", "path", "cpu"), &OIPComms::register_tag_group);
+	ClassDB::bind_method(D_METHOD("register_tag_group", "tag_group_name", "polling_interval", "protocol", "gateway", "path", "cpu", "byte_order"), &OIPComms::register_tag_group, DEFVAL(""));
 	ClassDB::bind_method(D_METHOD("register_tag", "tag_group_name", "tag_name", "elem_count"), &OIPComms::register_tag);
 
 	ClassDB::bind_method(D_METHOD("set_enable_comms", "value"), &OIPComms::set_enable_comms);
@@ -520,7 +529,7 @@ void OIPComms::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("enable_comms_changed"));
 }
 
-void OIPComms::register_tag_group(const String p_tag_group_name, const int p_polling_interval, const String p_protocol, const String p_gateway, const String p_path, const String p_cpu) {
+void OIPComms::register_tag_group(const String p_tag_group_name, const int p_polling_interval, const String p_protocol, const String p_gateway, const String p_path, const String p_cpu, const String p_byte_order) {
 	if (p_tag_group_name.is_empty()) return;
 
 	String _gateway = p_gateway;
@@ -546,6 +555,7 @@ void OIPComms::register_tag_group(const String p_tag_group_name, const int p_pol
 
 		p_path,
 		p_cpu,
+		p_byte_order,
 		std::map<String, PlcTag>(),
 
 		nullptr,
