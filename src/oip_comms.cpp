@@ -154,11 +154,11 @@ void OIPComms::opc_write(const String &tag_group_name, const String &tag_path) {
 
 #define OIP_OPC_SET(a, b, c, d) \
 void OIPComms::opc_tag_set_##a(const String &tag_group_name, const String &tag_path, const godot::Variant value) { \
-	if (value.get_type() == Variant::##d) { \
+	if (value.get_type() == d) { \
 		if (!opc_ua_client_connected(tag_group_name)) return; \
 		OpcUaTag &tag = tag_groups[tag_group_name].opc_ua_tags[tag_path]; \
 		if (!tag.initialized) return; \
-		b raw_value = (b)value; \
+		b raw_value = static_cast<b>(value); \
 		UA_StatusCode ret_val = UA_Variant_setScalarCopy(&(tag.value), &raw_value, &UA_TYPES[UA_TYPES_##c]); \
 		if (ret_val != UA_STATUSCODE_GOOD) \
 			print("OIP Comms: Failed to cast data on write for " + tag_path, true); \
@@ -172,17 +172,17 @@ void OIPComms::opc_tag_set_##a(const String &tag_group_name, const String &tag_p
 libplctag, open62541 and Godot have different names for each of the fundamental data types
 Godot variants support direct casting, while open62541 needs to use UA_Variant_setScalarCopy()
 */
-OIP_OPC_SET(bit, bool, BOOLEAN, BOOL)
-OIP_OPC_SET(uint64, uint64_t, UINT64, INT)
-OIP_OPC_SET(int64, int64_t, INT64, INT)
-OIP_OPC_SET(uint32, uint32_t, UINT32, INT)
-OIP_OPC_SET(int32, int32_t, INT32, INT)
-OIP_OPC_SET(uint16, uint16_t, UINT16, INT)
-OIP_OPC_SET(int16, int16_t, INT16, INT)
-OIP_OPC_SET(uint8, uint8_t, UINT16, INT) // there's no 8 bit integer types in OPC UA
-OIP_OPC_SET(int8, int8_t, INT16, INT)
-OIP_OPC_SET(float64, double, DOUBLE, FLOAT)
-OIP_OPC_SET(float32, float, FLOAT, FLOAT)
+OIP_OPC_SET(bit, bool, BOOLEAN, Variant::BOOL)
+OIP_OPC_SET(uint64, uint64_t, UINT64, Variant::INT)
+OIP_OPC_SET(int64, int64_t, INT64, Variant::INT)
+OIP_OPC_SET(uint32, uint32_t, UINT32, Variant::INT)
+OIP_OPC_SET(int32, int32_t, INT32, Variant::INT)
+OIP_OPC_SET(uint16, uint16_t, UINT16, Variant::INT)
+OIP_OPC_SET(int16, int16_t, INT16, Variant::INT)
+OIP_OPC_SET(uint8, uint8_t, UINT16, Variant::INT) // there's no 8 bit integer types in OPC UA
+OIP_OPC_SET(int8, int8_t, INT16, Variant::INT)
+OIP_OPC_SET(float64, double, DOUBLE, Variant::FLOAT)
+OIP_OPC_SET(float32, float, FLOAT, Variant::FLOAT)
 
 #define OIP_SET_CALL(a) \
 if (tag_group.protocol == "opc_ua") { \
@@ -359,7 +359,7 @@ bool OIPComms::init_opc_ua_tag(const String &tag_group_name, const String &tag_p
 	UA_Variant_init(&tag.value);
 
 	if (tag_path.is_valid_int()) {
-		tag.node_id = UA_NODEID_NUMERIC((UA_UInt16)tag_group.path.to_int(), (UA_UInt32)tag_path.to_int);
+		tag.node_id = UA_NODEID_NUMERIC((UA_UInt16)tag_group.path.to_int(), (UA_UInt32)tag_path.to_int());
 	} else {
 		tag.node_id = UA_NODEID_STRING_ALLOC((UA_UInt16)tag_group.path.to_int(), tag_path.utf8().get_data());
 	}
