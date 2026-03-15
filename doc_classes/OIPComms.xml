@@ -155,7 +155,7 @@
 			The format of [code]tag_name[/code] depends on the protocol of the tag group:
 			[b]EtherNet/IP ([code]ab_eip[/code]):[/b] A CIP tag name as defined in the PLC program (e.g. [code]MyTag[/code], [code]Program:MainProgram.MyTag[/code], [code]myUDT.field[/code], [code]myArray[0][/code]).
 			[b]Modbus TCP ([code]modbus_tcp[/code]):[/b] A register type prefix followed by the register number: [code]co[/code] (coil), [code]di[/code] (discrete input), [code]hr[/code] (holding register), or [code]ir[/code] (input register). For example: [code]hr0[/code], [code]co21[/code].
-			[b]OPC UA ([code]opc_ua[/code]):[/b] Only the identifier after the namespace prefix. The namespace is already specified by the tag group's [code]path[/code] field. For example, [code]MyVariable[/code] from [code]ns=2;s=MyVariable[/code], or [code]12345[/code] from [code]ns=2;i=12345[/code].
+			[b]OPC UA ([code]opc_ua[/code]):[/b] The full OPC UA node ID in standard notation. Use [code]ns=X;i=Y[/code] for numeric identifiers or [code]ns=X;s=Y[/code] for string identifiers. For example: [code]ns=2;i=12345[/code] or [code]ns=2;s=MyVariable[/code].
 			[i]Note: [code]elem_count[/code] is not currently implemented. This will be future work if array reads/writes are needed.[/i]
 			</description>
 		</method>
@@ -181,7 +181,7 @@
 			- [code]Micro800[/code]
 			- [code]MicroLogix[/code]
 			- [code]Omron[/code]
-			When the protocol is [code]opc_ua[/code], the [code]gateway[/code] is the OPC UA server's "endpoint", and the [code]path[/code] field is the "namespace" (typically a number). [code]cpu[/code] is not used.
+			When the protocol is [code]opc_ua[/code], the [code]gateway[/code] is the OPC UA server's endpoint (e.g. [code]opc.tcp://192.168.1.100:4840[/code]). The [code]path[/code] and [code]cpu[/code] fields are not used (the namespace is part of each tag's node ID).
 			</description>
 		</method>
 		<method name="set_enable_comms">

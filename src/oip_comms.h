@@ -40,8 +40,6 @@ private:
 		bool initialized = false;
 		UA_NodeId node_id;
 		UA_Variant value;
-
-		// no implementation of "dirty" tags here - see if needed on the PLC interface
 	};
 
 	struct TagGroup {
@@ -49,6 +47,7 @@ private:
 		double time;
 		size_t init_count;
 		bool init_count_emitted;
+		bool has_error = false;
 
 		String protocol;
 
@@ -56,8 +55,8 @@ private:
 		// or the address of an OPC UA server endpoint, "opc.tcp://192.168.56.104:62541"
 		String gateway;
 
-		// path is a multi-purpose field. it is the rack/slot number of a PLC, "1,2"
-		// or the namespace address of an OPC UA server, "1"
+		// PLC: rack/slot number, e.g. "1,2"
+		// OPC UA: unused (namespace is part of the tag name, e.g. "ns=2;i=5")
 		String path;
 
 		String cpu;

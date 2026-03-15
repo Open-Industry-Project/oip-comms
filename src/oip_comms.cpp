@@ -20,8 +20,6 @@ OIPComms::OIPComms() {
 }
 
 OIPComms::~OIPComms() {
-	cleanup_tag_groups();
-
 	watchdog_thread_running = false;
 	work_thread_running = false;
 	tag_group_queue.shutdown();
@@ -29,6 +27,8 @@ OIPComms::~OIPComms() {
 	work_thread->wait_to_finish();
 	watchdog_thread->wait_to_finish();
 	print("Threads shutdown");
+
+	cleanup_tag_groups();
 }
 
 void OIPComms::cleanup_tag_groups() {
@@ -46,6 +46,7 @@ void OIPComms::cleanup_tag_group(const String &tag_group_name) {
 	if (tag_group.protocol == "opc_ua") {
 		for (auto &x : tag_group.opc_ua_tags) {
 			OpcUaTag &tag = x.second;
+			UA_NodeId_clear(&tag.node_id);
 			UA_Variant_clear(&tag.value);
 		}
 
@@ -64,6 +65,7 @@ void OIPComms::cleanup_tag_group(const String &tag_group_name) {
 	}
 	tag_group.init_count = 0;
 	tag_group.init_count_emitted = false;
+	tag_group.has_error = false;
 }
 
 void OIPComms::watchdog() {
@@ -249,6 +251,9 @@ void OIPComms::process_write(const WriteRequest &write_req) {
 
 void OIPComms::process_tag_group(const String &tag_group_name) {
 	TagGroup &tag_group = tag_groups[tag_group_name];
+	if (tag_group.has_error)
+		return;
+
 	if (tag_group.protocol == "opc_ua") {
 		process_opc_ua_tag_group(tag_group_name);
 	} else {
@@ -262,19 +267,18 @@ void OIPComms::process_plc_tag_group(const String &tag_group_name) {
 		const String tag_name = x.first;
 		PlcTag &tag = x.second;
 
-		// tag is not initialized
 		if (tag.tag_pointer < 0) {
-			if (!init_plc_tag(tag_group_name, tag_name))
-				break;
+			if (!init_plc_tag(tag_group_name, tag_name)) {
+				tag_group.has_error = true;
+				return;
+			}
 		}
 
-		// tag is initialized, read it
 		if (tag.tag_pointer >= 0) {
 			if (!process_plc_read(tag, tag_name)) {
-				print("Skipping remainder of tag group: " + tag_group_name);
-				break;
+				tag_group.has_error = true;
+				return;
 			} else {
-				// if read was successful, the tag read is now clean
 				tag.dirty = false;
 			}
 		}
@@ -317,15 +321,18 @@ void OIPComms::process_opc_ua_tag_group(const String &tag_group_name) {
 		OpcUaTag &tag = x.second;
 
 		if (!tag.initialized) {
-			init_opc_ua_tag(tag_group_name, tag_path);
+			if (!init_opc_ua_tag(tag_group_name, tag_path)) {
+				tag_group.has_error = true;
+				return;
+			}
 		}
 
 		if (tag.initialized) {
 			UA_StatusCode ret_val = UA_Client_readValueAttribute(tag_group.client, tag.node_id, &(tag.value));
 			if (ret_val != UA_STATUSCODE_GOOD) {
 				print("OPC UA failed to read " + tag_path + " with status code " + String(UA_StatusCode_name(ret_val)), true);
-				print("Skipping remainder of tag group: " + tag_group_name);
-				break;
+				tag_group.has_error = true;
+				return;
 			}
 		}
 	}
@@ -334,18 +341,23 @@ void OIPComms::process_opc_ua_tag_group(const String &tag_group_name) {
 bool OIPComms::init_opc_ua_client(const String& tag_group_name) {
 	TagGroup &tag_group = tag_groups[tag_group_name];
 
-	UA_StatusCode ret_val = UA_STATUSCODE_BAD;
+	if (tag_group.client != nullptr) {
+		UA_Client_disconnect(tag_group.client);
+		UA_Client_delete(tag_group.client);
+		tag_group.client = nullptr;
+	}
 
 	tag_group.client = UA_Client_new();
 
 	UA_ClientConfig *config = UA_Client_getConfig(tag_group.client);
 	UA_ClientConfig_setDefault(config);
-	//config->logging = nullptr;
 
-	const char *endpoint_URL = tag_group.gateway.utf8().get_data();
-	ret_val = UA_Client_connect(tag_group.client, endpoint_URL);
+	CharString gateway_utf8 = tag_group.gateway.utf8();
+	UA_StatusCode ret_val = UA_Client_connect(tag_group.client, gateway_utf8.get_data());
 	if (ret_val != UA_STATUSCODE_GOOD) {
-		print("OIP Comms: The OPC UA connection failed with status code " + String(UA_StatusCode_name(ret_val)), true);
+		print("OPC UA connection failed with status code " + String(UA_StatusCode_name(ret_val)), true);
+		UA_Client_delete(tag_group.client);
+		tag_group.client = nullptr;
 		return false;
 	}
 
@@ -358,13 +370,15 @@ bool OIPComms::init_opc_ua_tag(const String &tag_group_name, const String &tag_p
 
 	UA_Variant_init(&tag.value);
 
-	if (tag_path.is_valid_int()) {
-		tag.node_id = UA_NODEID_NUMERIC((UA_UInt16)tag_group.path.to_int(), (UA_UInt32)tag_path.to_int());
-	} else {
-		tag.node_id = UA_NODEID_STRING_ALLOC((UA_UInt16)tag_group.path.to_int(), tag_path.utf8().get_data());
+	CharString tag_path_utf8 = tag_path.utf8();
+	UA_String node_id_str = UA_STRING(const_cast<char *>(tag_path_utf8.get_data()));
+	UA_StatusCode ret_val = UA_NodeId_parse(&tag.node_id, node_id_str);
+	if (ret_val != UA_STATUSCODE_GOOD) {
+		print("Failed to parse OPC UA node ID: " + tag_path + " with status code " + String(UA_StatusCode_name(ret_val)) + " (expected format: ns=X;i=Y or ns=X;s=Y)", true);
+		return false;
 	}
-	tag.initialized = true;
 
+	tag.initialized = true;
 	tag_group.init_count++;
 
 	return true;
@@ -378,7 +392,7 @@ bool OIPComms::opc_ua_client_connected(const String &tag_group_name) {
 	UA_StatusCode client_status;
 	UA_Client_getState(tag_group.client, nullptr, nullptr, &client_status);
 	if (client_status != UA_STATUSCODE_GOOD)
-		false;
+		return false;
 	return true;
 }
 
@@ -539,6 +553,7 @@ void OIPComms::register_tag_group(const String p_tag_group_name, const int p_pol
 		p_polling_interval * 1.0f,
 		0,
 		false,
+		false,
 
 		p_protocol,
 
@@ -647,6 +662,7 @@ void OIPComms::clear_tag_groups() {
 		print("Can't clear tag group when simulation is running");
 	else {
 		print("Clearing tag groups");
+		cleanup_tag_groups();
 		tag_groups.clear();
 		tag_group_order.clear();
 	}
@@ -661,11 +677,16 @@ void OIPComms::clear_tag_groups() {
 	b OIPComms::read_##a(const String p_tag_group_name, const String p_tag_name) { \
 		if (enable_comms && sim_running && tag_exists(p_tag_group_name, p_tag_name)) {                                         \
 			TagGroup &tag_group = tag_groups[p_tag_group_name];                    \
+			if (tag_group.has_error) return 0.0;                                   \
 			if (tag_group.protocol == "opc_ua") {                                  \
-				OpcUaTag tag = tag_group.opc_ua_tags[p_tag_name];                  \
+				OpcUaTag &tag = tag_group.opc_ua_tags[p_tag_name];                 \
 				if (tag.initialized && UA_Variant_hasScalarType(&tag.value, &UA_TYPES[UA_TYPES_##c])) { \
 					return *(b *)tag.value.data; \
-				} else { return 0.0; } \
+				} else if (tag.initialized && tag.value.type != nullptr) { \
+					print("Type mismatch on " + p_tag_name + ": server type is " + String(tag.value.type->typeName) + ", but read_" #a " was called", true); \
+					tag_group.has_error = true; \
+				} \
+				return 0.0; \
 			} else {                                                               \
 				PlcTag tag = tag_group.plc_tags[p_tag_name];                      \
 				if (tag.initialized) {                                           \
