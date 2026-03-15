@@ -68,6 +68,7 @@ private:
 
 	};
 	std::map<String, TagGroup> tag_groups;
+	std::vector<String> tag_group_order;
 
 	struct WriteRequest {
 		uint8_t instruction;

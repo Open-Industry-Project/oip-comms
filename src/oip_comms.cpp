@@ -179,8 +179,8 @@ OIP_OPC_SET(uint32, uint32_t, UINT32, INT)
 OIP_OPC_SET(int32, int32_t, INT32, INT)
 OIP_OPC_SET(uint16, uint16_t, UINT16, INT)
 OIP_OPC_SET(int16, int16_t, INT16, INT)
-OIP_OPC_SET(uint8, uint8_t, UINT16, INT) // there's no 8 bit integer types in OPC UA
-OIP_OPC_SET(int8, int8_t, INT16, INT)
+OIP_OPC_SET(uint8, uint8_t, BYTE, INT)
+OIP_OPC_SET(int8, int8_t, SBYTE, INT)
 OIP_OPC_SET(float64, double, DOUBLE, FLOAT)
 OIP_OPC_SET(float32, float, FLOAT, FLOAT)
 
@@ -359,7 +359,7 @@ bool OIPComms::init_opc_ua_tag(const String &tag_group_name, const String &tag_p
 	UA_Variant_init(&tag.value);
 
 	if (tag_path.is_valid_int()) {
-		tag.node_id = UA_NODEID_NUMERIC((UA_UInt16)tag_group.path.to_int(), (UA_UInt32)tag_path.to_int);
+		tag.node_id = UA_NODEID_NUMERIC((UA_UInt16)tag_group.path.to_int(), (UA_UInt32)tag_path.to_int());
 	} else {
 		tag.node_id = UA_NODEID_STRING_ALLOC((UA_UInt16)tag_group.path.to_int(), tag_path.utf8().get_data());
 	}
@@ -552,6 +552,8 @@ void OIPComms::register_tag_group(const String p_tag_group_name, const int p_pol
 		std::map<String, OpcUaTag>()
 	};
 
+	if (!tag_group_exists(p_tag_group_name))
+		tag_group_order.push_back(p_tag_group_name);
 	tag_groups[p_tag_group_name] = tag_group;
 	print("Tag group registered: " + p_tag_group_name);
 }
@@ -633,8 +635,8 @@ String OIPComms::get_comms_error() {
 Array OIPComms::get_tag_groups() {
 	Array groups;
 
-	for (const auto &x : tag_groups) {
-		groups.push_back(x.first);
+	for (const auto &name : tag_group_order) {
+		groups.push_back(name);
 	}
 
 	return groups;
@@ -646,6 +648,7 @@ void OIPComms::clear_tag_groups() {
 	else {
 		print("Clearing tag groups");
 		tag_groups.clear();
+		tag_group_order.clear();
 	}
 }
 
@@ -681,8 +684,8 @@ OIP_READ_FUNC(uint32, uint32_t, UINT32)
 OIP_READ_FUNC(int32, int32_t, INT32)
 OIP_READ_FUNC(uint16, uint16_t, UINT16)
 OIP_READ_FUNC(int16, int16_t, INT16)
-OIP_READ_FUNC(uint8, uint8_t, UINT16)
-OIP_READ_FUNC(int8, int8_t, INT16)
+OIP_READ_FUNC(uint8, uint8_t, BYTE)
+OIP_READ_FUNC(int8, int8_t, SBYTE)
 OIP_READ_FUNC(float64, double, DOUBLE)
 OIP_READ_FUNC(float32, float, FLOAT)
 
