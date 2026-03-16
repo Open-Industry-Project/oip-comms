@@ -155,7 +155,7 @@
 			The format of [code]tag_name[/code] depends on the protocol of the tag group:
 			[b]EtherNet/IP ([code]ab_eip[/code]):[/b] A CIP tag name as defined in the PLC program (e.g. [code]MyTag[/code], [code]Program:MainProgram.MyTag[/code], [code]myUDT.field[/code], [code]myArray[0][/code]).
 			[b]Modbus TCP ([code]modbus_tcp[/code]):[/b] A register type prefix followed by the register number: [code]co[/code] (coil), [code]di[/code] (discrete input), [code]hr[/code] (holding register), or [code]ir[/code] (input register). For example: [code]hr0[/code], [code]co21[/code].
-			[b]OPC UA ([code]opc_ua[/code]):[/b] The full OPC UA node ID in standard notation. Use [code]ns=X;i=Y[/code] for numeric identifiers or [code]ns=X;s=Y[/code] for string identifiers. For example: [code]ns=2;i=12345[/code] or [code]ns=2;s=MyVariable[/code].
+			[b]OPC UA ([code]opc_ua[/code]):[/b] The full OPC UA node ID in standard notation. Use [code]ns=X;i=Y[/code] or [code]ns=X;s=Y[/code] with a numeric namespace index, or [code]nsu=URI;i=Y[/code] or [code]nsu=URI;s=Y[/code] with a namespace URI. For example: [code]ns=2;i=12345[/code], [code]ns=2;s=MyVariable[/code], or [code]nsu=CODESYSSPV3/3S/IecVarAccess;s=|var|MyApp.PLC_PRG.myVar[/code].
 			[i]Note: [code]elem_count[/code] is not currently implemented. This will be future work if array reads/writes are needed.[/i]
 			</description>
 		</method>

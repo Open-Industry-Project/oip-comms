@@ -370,11 +370,30 @@ bool OIPComms::init_opc_ua_tag(const String &tag_group_name, const String &tag_p
 
 	UA_Variant_init(&tag.value);
 
-	CharString tag_path_utf8 = tag_path.utf8();
-	UA_String node_id_str = UA_STRING(const_cast<char *>(tag_path_utf8.get_data()));
+	String resolved_path = tag_path;
+	if (tag_path.begins_with("nsu=")) {
+		int semicolon = tag_path.find(";");
+		if (semicolon == -1) {
+			print("Invalid OPC UA node ID: " + tag_path + " (expected nsu=URI;i=Y or nsu=URI;s=Y)", true);
+			return false;
+		}
+		String ns_uri = tag_path.substr(4, semicolon - 4);
+		CharString ns_uri_utf8 = ns_uri.utf8();
+		UA_String ua_ns_uri = UA_STRING(const_cast<char *>(ns_uri_utf8.get_data()));
+		UA_UInt16 ns_index;
+		UA_StatusCode ret_val = UA_Client_NamespaceGetIndex(tag_group.client, &ua_ns_uri, &ns_index);
+		if (ret_val != UA_STATUSCODE_GOOD) {
+			print("Failed to resolve namespace URI: " + ns_uri + " with status code " + String(UA_StatusCode_name(ret_val)), true);
+			return false;
+		}
+		resolved_path = "ns=" + itos(ns_index) + tag_path.substr(semicolon);
+	}
+
+	CharString resolved_utf8 = resolved_path.utf8();
+	UA_String node_id_str = UA_STRING(const_cast<char *>(resolved_utf8.get_data()));
 	UA_StatusCode ret_val = UA_NodeId_parse(&tag.node_id, node_id_str);
 	if (ret_val != UA_STATUSCODE_GOOD) {
-		print("Failed to parse OPC UA node ID: " + tag_path + " with status code " + String(UA_StatusCode_name(ret_val)) + " (expected format: ns=X;i=Y or ns=X;s=Y)", true);
+		print("Failed to parse OPC UA node ID: " + tag_path + " with status code " + String(UA_StatusCode_name(ret_val)) + " (expected format: ns=X;i=Y, ns=X;s=Y, nsu=URI;i=Y, or nsu=URI;s=Y)", true);
 		return false;
 	}
 
