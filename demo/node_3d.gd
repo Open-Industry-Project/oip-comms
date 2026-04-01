@@ -1,6 +1,10 @@
 @tool
 extends Node3D
 
+func _ready() -> void:
+	OIPComms.set_enable_log(true);
+	pass # Replace with function body.
+
 @export var register_tag_group := false: set = _register_tag_group 
 func _register_tag_group(_value: bool) -> void:
 	OIPComms.register_tag_group("test", 5000, "ab_eip", "localhost", "1,2", "ControlLogix")
@@ -22,8 +26,9 @@ func _flip_bit(_value: bool) -> void:
 	OIPComms.write_bit("test", "TEST_INPUT", 0)
 	OIPComms.write_bit("test", "TEST_INPUT", 1)
 
-@export var test_editor := false: set = _test_editor
+@export var enable_com := false: set = _test_editor
 func _test_editor(value: bool) -> void:
 	OIPComms.set_enable_comms(value)
-	test_editor = value
+	OIPComms.set_sim_running(value)
+	enable_com = value
 	pass

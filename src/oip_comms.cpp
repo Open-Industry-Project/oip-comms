@@ -57,10 +57,21 @@ void OIPComms::cleanup_tag_group(const String &tag_group_name) {
 		}
 		tag_group.opc_ua_tags.clear();
 
-	} else {
+	} else if (tag_group.protocol == "opc_ua") {
 		for (auto &x : tag_group.plc_tags) {
 			PlcTag &tag = x.second;
-			plc_tag_destroy(tag.tag_pointer);
+			S7_tag_destroy(tag.tag_pointer);
+		}
+		tag_group.plc_tags.clear();
+	}
+
+	else {
+		for (auto &x : tag_group.plc_tags) {
+			PlcTag &tag = x.second;
+			if (tag_group.protocol == "s7")
+				S7_tag_destroy(tag.tag_pointer);
+			else
+				plc_tag_destroy(tag.tag_pointer);
 		}
 		tag_group.plc_tags.clear();
 	}
@@ -157,18 +168,18 @@ void OIPComms::opc_write(const String &tag_group_name, const String &tag_path) {
 
 #define OIP_OPC_SET(a, b, c, d) \
 void OIPComms::opc_tag_set_##a(const String &tag_group_name, const String &tag_path, const godot::Variant value) { \
-	if (value.get_type() == Variant::##d) { \
-		if (!opc_ua_client_connected(tag_group_name)) return; \
-		OpcUaTag &tag = tag_groups[tag_group_name].opc_ua_tags[tag_path]; \
-		if (!tag.initialized) return; \
-		b raw_value = (b)value; \
+	if (value.get_type() == Variant::##d) {                                        \
+		if (!opc_ua_client_connected(tag_group_name)) return;                      \
+		OpcUaTag &tag = tag_groups[tag_group_name].opc_ua_tags[tag_path];          \
+		if (!tag.initialized) return;                                              \
+		b raw_value = (b)value;                                                    \
 		UA_StatusCode ret_val = UA_Variant_setScalarCopy(&(tag.value), &raw_value, &UA_TYPES[UA_TYPES_##c]); \
-		if (ret_val != UA_STATUSCODE_GOOD) \
-			print("OIP Comms: Failed to cast data on write for " + tag_path, true); \
-		opc_write(tag_group_name, tag_path); \
-	} else { \
-		print("OIP Comms: Supplied data type incorrect for " + tag_path, true); \
-	} \
+		if (ret_val != UA_STATUSCODE_GOOD)                                         \
+			print("OIP Comms: Failed to cast data on write for " + tag_path, true);\
+		opc_write(tag_group_name, tag_path);                                       \
+	} else {                                                                       \
+		print("OIP Comms: Supplied data type incorrect for " + tag_path, true);    \
+	}                                                                              \
 }
 
 /* Data marshalling is a giant PITA in this project
@@ -187,11 +198,14 @@ OIP_OPC_SET(int8, int8_t, SBYTE, INT)
 OIP_OPC_SET(float64, double, DOUBLE, FLOAT)
 OIP_OPC_SET(float32, float, FLOAT, FLOAT)
 
-#define OIP_SET_CALL(a) \
-if (tag_group.protocol == "opc_ua") { \
+#define OIP_SET_CALL(a)                                                             \
+if (tag_group.protocol == "opc_ua") {                                               \
 	opc_tag_set_##a(write_req.tag_group_name, write_req.tag_name, write_req.value); \
-} else { \
-	if (tag_pointer >= 0) plc_tag_set_##a(tag_pointer, 0, write_req.value); \
+} else if (tag_group.protocol == "s7") {                                            \
+		if (tag_pointer >= 0) S7_tag_set_##a(tag_pointer, write_req.value);         \
+}                                                                                   \
+else {                                                                              \
+	if (tag_pointer >= 0) plc_tag_set_##a(tag_pointer, 0, write_req.value);         \
 }
 
 void OIPComms::process_write(const WriteRequest &write_req) {
@@ -242,10 +256,21 @@ void OIPComms::process_write(const WriteRequest &write_req) {
 	// this code only need for PLC interface - the above code is "setting" the data in memory
 	// this code actually writes to the PLC tags
 	if (tag_group.protocol != "opc_ua") {
-		if (tag_pointer >= 0 && plc_tag_write(tag_pointer, timeout) == PLCTAG_STATUS_OK) {
-			tag_groups[write_req.tag_group_name].plc_tags[write_req.tag_name].dirty = true;
-		} else {
-			print("Failed to write tag: " + write_req.tag_name, true);
+		if (tag_group.protocol == "s7"){
+			if (tag_pointer >= 0 && S7_tag_write(tag_pointer) == PLCTAG_STATUS_OK) {
+				tag_groups[write_req.tag_group_name].plc_tags[write_req.tag_name].dirty = true;
+				print("Write tag done: " + write_req.tag_name);
+			} else {
+				print("Failed to write tag: " + write_req.tag_name, true);
+				print("Write tag done: " + write_req.tag_name);
+			}
+		}
+		else {
+			if (tag_pointer >= 0 && plc_tag_write(tag_pointer, timeout) == PLCTAG_STATUS_OK) {
+				tag_groups[write_req.tag_group_name].plc_tags[write_req.tag_name].dirty = true;
+			} else {
+				print("Failed to write tag: " + write_req.tag_name, true);
+			}
 		}
 	}
 }
@@ -270,11 +295,25 @@ void OIPComms::process_plc_tag_group(const String &tag_group_name) {
 
 		if (tag.tag_pointer < 0) {
 			if (!init_plc_tag(tag_group_name, tag_name)) {
+				print("Taggroup erro 1");
 				tag_group.has_error = true;
 				return;
 			}
 		}
+		if (tag_group.protocol == "s7")
+		{
+			int read_result = S7_tag_read(tag.tag_pointer, timeout);
+			if (read_result == PLCTAG_STATUS_OK) {
+				tag.dirty = false;
+				tag.initialized = true;
+			}
+			else
+			{
+				tag_group.has_error = true;
+				return;
+			}
 
+		} else
 		if (tag.tag_pointer >= 0) {
 			if (!process_plc_read(tag, tag_name)) {
 				tag_group.has_error = true;
@@ -290,11 +329,15 @@ bool OIPComms::init_plc_tag(const String &tag_group_name, const String &tag_name
 	TagGroup &tag_group = tag_groups[tag_group_name];
 	PlcTag &tag = tag_group.plc_tags[tag_name];
 
-	String group_tag_path = "protocol=" + tag_group.protocol + "&gateway=" + tag_group.gateway + "&path=" + tag_group.path + "&cpu=" + tag_group.cpu + "&elem_count=";
+	if (tag_group.protocol == "s7"){
 
-	String tag_path = group_tag_path + itos(tag.elem_count) + "&name=" + tag_name;
-	tag.tag_pointer = plc_tag_create(tag_path.utf8().get_data(), timeout);
+		tag.tag_pointer = S7_tag_create(tag_group.gateway.utf8().get_data(), tag_name.utf8().get_data());
 
+	} else {
+		String group_tag_path = "protocol=" + tag_group.protocol + "&gateway=" + tag_group.gateway + "&path=" + tag_group.path + "&cpu=" + tag_group.cpu + "&elem_count=";
+		String tag_path = group_tag_path + itos(tag.elem_count) + "&name=" + tag_name;
+		tag.tag_pointer = plc_tag_create(tag_path.utf8().get_data(), timeout);
+	}
 	// failed to create tag
 	if (tag.tag_pointer < 0) {
 		print("Failed to create tag: " + tag_name, true);
@@ -896,29 +939,36 @@ Dictionary OIPComms::browse_node_info(const String p_node_id) {
 // need to be a little more careful with thread safety. don't use pass by reference here, copy values
 // writes get queued, so should be fine
 
-#define OIP_READ_FUNC(a, b, c)                                                        \
+#define OIP_READ_FUNC(a, b, c)                                                    \
 	b OIPComms::read_##a(const String p_tag_group_name, const String p_tag_name) { \
-		if (enable_comms && sim_running && tag_exists(p_tag_group_name, p_tag_name)) {                                         \
+		if (enable_comms && sim_running && tag_exists(p_tag_group_name, p_tag_name)) {  \
 			TagGroup &tag_group = tag_groups[p_tag_group_name];                    \
 			if (tag_group.has_error) return 0.0;                                   \
 			if (tag_group.protocol == "opc_ua") {                                  \
 				OpcUaTag &tag = tag_group.opc_ua_tags[p_tag_name];                 \
 				if (tag.initialized && UA_Variant_hasScalarType(&tag.value, &UA_TYPES[UA_TYPES_##c])) { \
-					return *(b *)tag.value.data; \
-				} else if (tag.initialized && tag.value.type != nullptr) { \
+					return *(b *)tag.value.data;                                   \
+				} else if (tag.initialized && tag.value.type != nullptr) {         \
 					print("Type mismatch on " + p_tag_name + ": server type is " + String(tag.value.type->typeName) + ", but read_" #a " was called", true); \
-					tag_group.has_error = true; \
-				} \
-				return 0.0; \
-			} else {                                                               \
+					tag_group.has_error = true;                                   \
+				}                                                                 \
+				return 0.0;                                                       \
+			} else if (tag_group.protocol == "s7") {                              \
 				PlcTag tag = tag_group.plc_tags[p_tag_name];                      \
-				if (tag.initialized) {                                           \
-					int32_t tag_pointer = tag.tag_pointer;                     \
-					return plc_tag_get_##a(tag_pointer, 0);                     \
-				} else { return 0.0; }                                             \
-			}                                                                      \
-		}                                                                          \
-		return 0.0;                                                                 \
+				if (tag.initialized) {                                            \
+					int32_t tag_pointer = tag.tag_pointer;                        \
+					return S7_tag_get_##a(tag_pointer);                           \
+				}                                                                 \
+			}                                                                     \
+			else {                                                                \
+				PlcTag tag = tag_group.plc_tags[p_tag_name];                      \
+				if (tag.initialized) {                                            \
+					int32_t tag_pointer = tag.tag_pointer;                        \
+					return plc_tag_get_##a(tag_pointer, 0);                       \
+				} else { return 0.0; }                                            \
+			}                                                                     \
+		}                                                                         \
+		return 0.0;                                                               \
 	}
 
 OIP_READ_FUNC(bit, bool, BOOLEAN)
@@ -935,7 +985,7 @@ OIP_READ_FUNC(float32, float, FLOAT)
 
 #define OIP_WRITE_FUNC(a, b, c)                                                                                                         \
 	void OIPComms::write_##a(const String p_tag_group_name, const String p_tag_name, const b p_value) {                                 \
-		if (enable_comms && sim_running && tag_exists(p_tag_group_name, p_tag_name)) { \
+		if (enable_comms && sim_running && tag_exists(p_tag_group_name, p_tag_name)) {                                                  \
 			WriteRequest write_req = {                                                                                                  \
 				c,                                                                                                                      \
 				p_tag_group_name,                                                                                                       \
