@@ -57,21 +57,16 @@ void OIPComms::cleanup_tag_group(const String &tag_group_name) {
 		}
 		tag_group.opc_ua_tags.clear();
 
-	} else if (tag_group.protocol == "opc_ua") {
+	} else if (tag_group.protocol == "s7") {
 		for (auto &x : tag_group.plc_tags) {
 			PlcTag &tag = x.second;
 			S7_tag_destroy(tag.tag_pointer);
 		}
 		tag_group.plc_tags.clear();
-	}
-
-	else {
+	} else {
 		for (auto &x : tag_group.plc_tags) {
 			PlcTag &tag = x.second;
-			if (tag_group.protocol == "s7")
-				S7_tag_destroy(tag.tag_pointer);
-			else
-				plc_tag_destroy(tag.tag_pointer);
+			plc_tag_destroy(tag.tag_pointer);
 		}
 		tag_group.plc_tags.clear();
 	}
@@ -957,6 +952,7 @@ Dictionary OIPComms::browse_node_info(const String p_node_id) {
 				PlcTag tag = tag_group.plc_tags[p_tag_name];                      \
 				if (tag.initialized) {                                            \
 					int32_t tag_pointer = tag.tag_pointer;                        \
+	print(S7_tag_get_##a(tag_pointer));\
 					return S7_tag_get_##a(tag_pointer);                           \
 				}                                                                 \
 			}                                                                     \
