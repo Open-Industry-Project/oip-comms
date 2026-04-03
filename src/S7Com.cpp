@@ -604,7 +604,7 @@ int S7_tag_set_float64(int32_t tag, double val)
 float S7_tag_get_float32(int32_t tag)
 {
     uint64_t Val = S7_readTag(tag);
-    float* d = (float*)Val;
+    float* d = (float*)&Val;
     return *d;
 }
 int S7_tag_set_float32(int32_t tag, float val)
