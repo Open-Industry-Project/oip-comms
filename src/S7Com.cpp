@@ -592,7 +592,7 @@ int S7_tag_set_int8(int32_t tag, int8_t val)
 double S7_tag_get_float64(int32_t tag)
 {
     uint64_t Val = S7_readTag(tag);
-    double*  d = (double*)Val;
+    double*  d = (double*)&Val;
     return *d;
 
 }
