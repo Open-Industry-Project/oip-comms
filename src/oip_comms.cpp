@@ -952,7 +952,6 @@ Dictionary OIPComms::browse_node_info(const String p_node_id) {
 				PlcTag tag = tag_group.plc_tags[p_tag_name];                      \
 				if (tag.initialized) {                                            \
 					int32_t tag_pointer = tag.tag_pointer;                        \
-	print(S7_tag_get_##a(tag_pointer));\
 					return S7_tag_get_##a(tag_pointer);                           \
 				} else { return 0.0; }                                            \
 			}                                                                     \
