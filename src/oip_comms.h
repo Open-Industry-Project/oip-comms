@@ -3,6 +3,7 @@
 
 #include "libplctag.h"
 #include "open62541.h"
+#include "S7Com.hpp"
 
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/classes/thread.hpp>
