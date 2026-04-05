@@ -19,6 +19,7 @@
     #pragma comment(lib, "ws2_32.lib")
     using socket_t = SOCKET;
     inline void socket_close(socket_t s) { closesocket(s); }
+    inline void socket_shutdown(socket_t s) { shutdown(s, SD_BOTH); }
     inline int tcp_send(socket_t s, const void* data, int len) { return ::send(s, (const char*)data, len, 0); }
     inline int tcp_recv(socket_t s, void* buf, int len) { return ::recv(s, (char*)buf, len, 0); }
     static constexpr socket_t invalid_socket_v = INVALID_SOCKET;
@@ -33,6 +34,7 @@
     #include <errno.h>
     using socket_t = int;
     inline void socket_close(socket_t s) { ::close(s); }
+    inline void socket_shutdown(socket_t s) { shutdown(s, SHUT_RDWR); }
     inline int tcp_send(socket_t s, const void* data, int len) { return (int)::send(s, data, (size_t)len, 0); }
     inline int tcp_recv(socket_t s, void* buf, int len) { return (int)::recv(s, buf, (size_t)len, 0); }
     static constexpr socket_t invalid_socket_v = -1;
@@ -120,12 +122,15 @@ public:
         sock = invalid_socket_v;
         TerminateThread = false;
         PollingThread = std::thread(&S7Plc::s7_poll, this);
+        PollingThread.detach(); // Not required in Godot, but in OIP ... strange
+
     }
 
     ~S7Plc()
     {
         TerminateThread = true;
-        PollingThread.join();
+        S7_sockClose();
+       // PollingThread.join();
     }
 
 private:
@@ -155,6 +160,7 @@ private:
 
     int S7_sockClose()
     {
+        socket_shutdown(sock);
         socket_close(sock);
         sock = invalid_socket_v;
         state = 0; 
