@@ -123,14 +123,13 @@ public:
         TerminateThread = false;
         PollingThread = std::thread(&S7Plc::s7_poll, this);
 
-
     }
 
     ~S7Plc()
     {
         TerminateThread = true;
         S7_sockClose();
-
+        PollingThread.join();
     }
 
 private:
