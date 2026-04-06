@@ -122,7 +122,6 @@ public:
         sock = invalid_socket_v;
         TerminateThread = false;
         PollingThread = std::thread(&S7Plc::s7_poll, this);
-        PollingThread.detach(); // Not required in Godot, but in OIP ... strange
 
     }
 
@@ -130,7 +129,7 @@ public:
     {
         TerminateThread = true;
         S7_sockClose();
-       // PollingThread.join();
+        PollingThread.join();
     }
 
 private:
