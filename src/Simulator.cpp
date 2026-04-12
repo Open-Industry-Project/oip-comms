@@ -2,7 +2,48 @@
 // interface similar to libplctag for a simple integration
 // F Chaxel 2026
 
+// Socket Windows & Linux adaptation
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#pragma comment(lib, "ws2_32.lib")
+using socket_t = SOCKET;
+inline void socket_close(socket_t s) { closesocket(s); }
+inline void socket_shutdown(socket_t s) { shutdown(s, SD_BOTH); }
+using socklen_t = int;
+inline int udp_sendto(socket_t s, const void* data, int len, const sockaddr* to, socklen_t tolen) {
+    return ::sendto(s, (const char*)data, len, 0, to, tolen);
+}
+inline int udp_recvfrom(socket_t s, void* buf, int len, sockaddr* from, socklen_t* fromlen) {
+    return ::recvfrom(s, (char*)buf, len, 0, from, fromlen);
+}
+static constexpr socket_t invalid_socket_v = INVALID_SOCKET;
+#else
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <stdio.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <errno.h>
+#include <algorithm.h>
+using socket_t = int;
+inline void socket_close(socket_t s) { ::close(s); }
+inline void socket_shutdown(socket_t s) { shutdown(s, SHUT_RDWR); }
+inline int udp_sendto(socket_t s, const void* data, int len, const sockaddr* to, socklen_t tolen) {
+    return (int)::sendto(s, data, (size_t)len, 0, to, tolen);
+}
+inline int udp_recvfrom(socket_t s, void* buf, int len, sockaddr* from, socklen_t* fromlen) {
+    return (int)::recvfrom(s, buf, (size_t)len, 0, from, fromlen);
+}
+static constexpr socket_t invalid_socket_v = -1;
+#endif
+
+
 #include <vector> 
+#include <set>
 #include <string>
 #include <cstring>
 #include <stdint.h>
@@ -12,12 +53,17 @@
 #include <chrono>
 #include <ctime>
 #include <cmath> 
+#include <thread>
+#include <mutex>
+#include <functional>
 
 #include "Simulator.hpp"
 
 class SimTag
 {
 #define LOOPLIMIT 20
+
+    friend class SimTagJsonRpcServer;
 
 public :
     static std::vector<SimTag*> theTagsStorage;
@@ -29,7 +75,7 @@ private:
 
     // Tag value : Internal format for all data types from bit to integer 32 and real
     // data lost with integers 64 but not usefull for OIP
-    double Val = 0;
+    std::atomic<double> Val = 0;
     bool IsConst = false;
     std::string Name;
 
@@ -49,10 +95,13 @@ private:
     std::vector<int> UserfuncValueTags; // for user sequence values ??applied to the output
     static bool Calc_Depth_reached;
 
+    static std::function<void(int)> onWritelistener; // could be (a day) a vector
+
     static void static_init()
     {
         if (Firstcall)
         {
+            onWritelistener = nullptr;
             Firstcall = false;
             // for funcPeriode, funcShift, ... default values
             SimTag::GetOrCreateTags("0"); // Tag identifier 0, value 0
@@ -159,18 +208,24 @@ public:
     {
         if ((identifier >= 0) && (identifier < SimTag::theTagsStorage.size()))
         {
-            SimTag::theTagsStorage[identifier]->SetVal(Value); // it don't care if the Tag is compute or not
+            double valback=SimTag::theTagsStorage[identifier]->SetVal(Value); 
+            
+            // Notify the observer if the value is accepted and not internal
+            if ((onWritelistener != nullptr) && (valback == Value) && (SimTag::theTagsStorage[identifier]->Name.front() != '@'))
+                onWritelistener(identifier);
+
             return 0;
         }
         else
             return -1;
     }
 
-    void SetVal(double v)
+    double SetVal(double v)
     {
-        if ((IsConst == true)||(func!=nullptr))
-            return;
-        Val = v; 
+        if (IsCalc())
+            return v++; // used to indicate write was not done
+        Val = v;
+        return v;
     }
 
     double GetVal()
@@ -189,6 +244,7 @@ public:
         else
             return Val;
     }
+
     static int GetOrCreateTags(std::string MathOperations)
     {
         static_init();
@@ -223,7 +279,7 @@ public:
 
     static void SimulationStart()
     {
-        srand(time(NULL));
+        srand((int)time(NULL));
         TimeStart = 0;
         TimeStart = GetMsSimulation();
     }
@@ -231,7 +287,9 @@ private:
   
     bool IsCalc()
     {
-        return _operator != ' ';
+        // consider a const is calculated
+        bool val = ((_operator != ' ') || (func != nullptr));
+        return ((_operator != ' ') || (func!=nullptr));
     }
  
     double GetVal(int Depth)
@@ -291,17 +349,15 @@ private:
         }
         return Val;
     }
-    static int findTag(std::vector<SimTag*>& TagsStorage,std::string Name)
+    static int findTag(std::string Name)
     {
-        for (int i = 0; i < TagsStorage.size(); i++)
-            if (TagsStorage[i]->Name == Name)
+        for (int i = 0; i < theTagsStorage.size(); i++)
+            if (theTagsStorage[i]->Name == Name)
                 return i;
        return -1;
     }
     static int GetOrCreateTag(std::string MathOperation)
     {
-        SimTag* Tag;
-
         // Don't accept this, it's very hard from the user to show it will create an hidden var
         if (MathOperation.front() == '=') return -1; // Another way could be MathOperation=MathOperation.substr(1)
         if ((MathOperation.front() == '!') || (MathOperation.front() == '~')) return -1;
@@ -318,7 +374,7 @@ private:
 
         if (components.size() ==1 ) // Tag declaration
         {
-            int idx = findTag(theTagsStorage,components[0]);
+            int idx = findTag(components[0]);
             if (idx != -1)
             {
                 return idx;
@@ -331,7 +387,7 @@ private:
 
                 SimTag* Tag = new SimTag(components[0]);
                 theTagsStorage.push_back(Tag);
-                return theTagsStorage.size()-1;
+                return (int)theTagsStorage.size()-1;
             }
 
         }
@@ -344,7 +400,7 @@ private:
             else
                 Tag1Id = GetOrCreateTag(components[1]);
 
-            int idx = findTag(theTagsStorage,components[0]);
+            int idx = findTag(components[0]);
             if (idx == -1) // New unknow Tag
             {
                 SimTag* Tag;
@@ -353,7 +409,7 @@ private:
                 else
                     Tag = new SimTag(components[0], '#', theTagsStorage[Tag1Id], nullptr, false, false);
                 theTagsStorage.push_back(Tag);
-                return theTagsStorage.size()-1;
+                return (int)theTagsStorage.size()-1;
             }
             else
             {
@@ -398,13 +454,13 @@ private:
             else
                 Tag2Id = Tag1Id;
 
-            int idx = findTag(theTagsStorage,components[0]);
+            int idx = findTag(components[0]);
 
             if (idx == -1) // New unknow Tag, add it
             {
                 SimTag* Tag= new SimTag(components[0], components[1][0], theTagsStorage[Tag1Id], theTagsStorage[Tag2Id], inv1, inv2);
                 theTagsStorage.push_back(Tag);
-                return theTagsStorage.size()-1;
+                return (int)theTagsStorage.size()-1;
             }
             else
             {
@@ -422,7 +478,7 @@ private:
     {
         auto now = std::chrono::system_clock::now();
         auto duration = now.time_since_epoch();
-        return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count() - TimeStart;
+        return (long)(std::chrono::duration_cast<std::chrono::milliseconds>(duration).count() - TimeStart);
     }
 
     double Random(int Depth)
@@ -435,8 +491,8 @@ private:
         double funcPeriode = theTagsStorage[funcPeriodeTag]->GetVal(Depth + 1);
         double funcShift = theTagsStorage[funcShiftTag]->GetVal(Depth + 1);
         if (funcPeriode == 0) return 0;
-        int timeMSeconds = GetMsSimulation() - funcShift * 1000;
-        int periodeMs = funcPeriode * 1000;
+        int timeMSeconds = int(GetMsSimulation() - funcShift * 1000);
+        int periodeMs = (int)(funcPeriode * 1000);
         int position = timeMSeconds % periodeMs;
 
         double angle = (2.0 * 3.14159265358979323846 * position) / periodeMs;
@@ -448,8 +504,8 @@ private:
         double funcShift = theTagsStorage[funcShiftTag]->GetVal(Depth + 1);
         if (funcPeriode == 0) return 0;
         if (funcPeriode == 0) return 0;
-        int timeMSeconds = GetMsSimulation() - funcShift * 1000;
-        int periodeMs = funcPeriodeTag * 1000;
+        int timeMSeconds = (int)(GetMsSimulation() - funcShift * 1000);
+        int periodeMs = (int)(funcPeriode * 1000);
 
         if ((timeMSeconds % periodeMs) < (periodeMs / 2))
             return 1;
@@ -463,11 +519,11 @@ private:
         if (funcPeriode == 0) return 0;
         double funcShift = theTagsStorage[funcShiftTag]->GetVal(Depth + 1);
 
-        int timeMSeconds = GetMsSimulation() - funcShift * 1000;
-        int periodeMs = funcPeriode * 1000;
+        int timeMSeconds = (int)(GetMsSimulation() - funcShift * 1000);
+        int periodeMs = (int)(funcPeriode * 1000);
         int position = timeMSeconds % periodeMs;
 
-        int Half_periodeMs = periodeMs / 2.0;
+        int Half_periodeMs = (int)(periodeMs / 2.0);
         double position_relative = position % Half_periodeMs;
 
         if (position < Half_periodeMs)
@@ -483,8 +539,8 @@ private:
         if (funcPeriode == 0) return 0;
         double funcShift = theTagsStorage[funcShiftTag]->GetVal(Depth + 1);
 
-        int timeMSeconds = GetMsSimulation() - funcShift * 1000;
-        int periodeMs = funcPeriode * 1000;
+        int timeMSeconds = (int)(GetMsSimulation() - funcShift * 1000);
+        int periodeMs = (int)(funcPeriode * 1000);
         int position = timeMSeconds % periodeMs;
         return (double)position / (double)periodeMs;
     }
@@ -494,10 +550,10 @@ private:
         if ((funcPeriode == 0) || (UserfuncValueTags.size() == 0)) return 0;
         double funcShift = theTagsStorage[funcShiftTag]->GetVal();
 
-        int timeMSeconds = GetMsSimulation() - funcShift * 1000;
-        int periodeMs = funcPeriodeTag * 1000;
+        int timeMSeconds = (int)(GetMsSimulation() - funcShift * 1000);
+        int periodeMs = (int)(funcPeriode * 1000);
         int position = timeMSeconds % periodeMs;
-        int Idx = ((double)position / (double)periodeMs * UserfuncValueTags.size());
+        int Idx = (int)((double)position / (double)periodeMs * UserfuncValueTags.size());
         return theTagsStorage[UserfuncValueTags.at(Idx)]->GetVal(Depth + 1);
     }
 
@@ -625,29 +681,352 @@ private:
 
         return components;
     }
+
 };
 
+// Network component
+// Very basic text base protocol on udp port 55555 with the last (unique expected) client:
+// JSON RPC only with notification (no request/response)
+//     -receive by the server
+//         advise message
+//             {"jsonrpc": "2.0", "method": "advise"}
+//             a data message notification will be send with all the tags/values just after
+//         write message
+//             {"jsonrpc": "2.0", "method": "put", "params":{"v1":value1,"v2":value2 ... }} in a single udp datagram (generaly only one tag value)
+//           no response but if advise is done before (normaly it is) a value changed message is sent
+//         unadvise message, not required closing the socket is OK
+//             {"jsonrpc": "2.0", "method": "unadvise"}
+//     - send to the client (send values of uncalculated and not internal (const or other) Tags only)
+//          {"jsonrpc": "2.0", "method":"notify", "params":{"v1":value1,"v2":value2,....}} in multiples udp datagram
+// values are double numbers
+//
+// The code here is a not a json-rpc protocol checker. A lot of false frames can be sent, we don't care about it. 
+// For instance for put it just check the word 'put' then it just find the second '{' then got the values.
+// So sending just advise or unadvise is OK and sending {put {"v1":value1,"v2":value2  is also OK (don't miss the two '{')
+// Malformed messages are welcome, some working, some not. Official JSON - RPC messages are preferable !
+class SimTagJsonRpcServer
+{
+    // UDP, 1 socket & thread
+    std::thread UdpThread;
+    socket_t udpSock;
+    sockaddr_in clientudpAddr;
+    std::atomic<bool> TerminateThreads;
+
+    std::mutex SimTagUdpServerMutex;
+    bool sendAll = false;
+
+    std::set<int> TagIdToSend;
+
+public:
+    SimTagJsonRpcServer()
+    {
+        TerminateThreads.store(false);
+        clientudpAddr.sin_family = 0xFFFF;
+        udpSock= invalid_socket_v;
+        UdpThread = std::thread(&SimTagJsonRpcServer::UDP_loop, this);
+
+        SimTag::onWritelistener = [this](int i) { this->OnNewTagValue(i); };
+    }
+    ~SimTagJsonRpcServer()
+    {
+        TerminateThreads.store(true);
+
+        if (udpSock != invalid_socket_v)
+        {
+            socket_shutdown(udpSock);
+            socket_close(udpSock);
+        }
+
+        UdpThread.join();
+    }
+    void OnNewTagValue(int identifier)
+    {
+        SimTagUdpServerMutex.lock();
+        TagIdToSend.insert(identifier);
+        SimTagUdpServerMutex.unlock();
+    }
+
+private:
+    inline bool socket_readable_select(socket_t s, int timeout_ms)
+    {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(s, &rfds);
+
+        timeval tv{};
+        timeval* ptv = nullptr;
+
+        if (timeout_ms >= 0) {
+            tv.tv_sec = timeout_ms / 1000;
+            tv.tv_usec = (timeout_ms % 1000) * 1000;
+            ptv = &tv;
+        }
+
+#ifdef _WIN32
+        int r = ::select(0, &rfds, nullptr, nullptr, ptv);
+        if (r == SOCKET_ERROR) return false;
+#else
+        int nfds = s + 1;
+        int r = ::select(nfds, &rfds, nullptr, nullptr, ptv);
+        if (r < 0) return false; // (option: g rer EINTR)
+#endif
+
+        return (r > 0) && (FD_ISSET(s, &rfds) != 0);
+    }
+
+    void UDP_loop()
+    {
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(55555);
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+        while (!TerminateThreads.load())
+        {
+            udpSock = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            if (udpSock == invalid_socket_v)
+                return;
+            
+            if (::bind(udpSock, (sockaddr*)&addr, (int)sizeof(addr)) == 0)
+            {
+
+                for (;;)
+                {
+                    uint8_t bufrecp[1500];
+                    sockaddr_in from{};
+                    
+                    if (socket_readable_select(udpSock, 10)) // wait receive with timeout
+                    {
+
+                        socklen_t fromLen = (socklen_t)sizeof(from);
+                        int n = udp_recvfrom(udpSock, bufrecp, sizeof(bufrecp)-1, (sockaddr*)&from, &fromLen);
+                        if (n < 0) break; // <0: error
+    
+                        bufrecp[n] = 0;
+
+                        std::string Msg((char*)bufrecp);
+
+                        if (Msg.find("put") != std::string::npos)
+                            WriteVars(std::string((char*)bufrecp));
+                        else if (Msg.find("unadvise") != std::string::npos)
+                            clientudpAddr.sin_family = 0xFFFF;
+                        else if (Msg.find("advise") != std::string::npos)
+                        {
+                            clientudpAddr = from;
+                            SendVars(udpSock, true);
+                        }
+                    }
+                    else
+                    {
+                        SendVars(udpSock, false); 
+                    }
+                }
+            }
+            else
+                socket_close(udpSock);
+
+            if (TerminateThreads.load())
+                return;
+
+            // unable to bind, certainly another server, try later
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        }
+    }
+    void SendVars(socket_t s, bool AllValues)
+    {
+        if (clientudpAddr.sin_family == 0xFFFF)
+            return;
+
+
+        SimTagUdpServerMutex.lock();
+
+        if (AllValues)
+        {
+            TagIdToSend.clear();
+            for (int i = 0; i < SimTag::theTagsStorage.size(); i++)
+                if ((SimTag::theTagsStorage[i]->IsConst == false)&&(SimTag::theTagsStorage[i]->IsCalc() == false)&&(SimTag::theTagsStorage[i]->Name[0]!='@'))
+                    TagIdToSend.insert(i);
+        }
+
+        std::string RepJson = "{\"jsonrpc\":\"2.0\",\"method\":\"notify\",\"params\":{";
+
+        for (int identifier : TagIdToSend)
+        {
+
+            std::string newVal = "\"" + SimTag::theTagsStorage[identifier]->Name + "\":" + to_string_trim(SimTag::theTagsStorage[identifier]->Val);
+            
+            if (RepJson.size()+newVal.size()<=1450) // udp up to 1452 on ipv6 
+                RepJson = RepJson + newVal + ',';
+            else
+            {
+                RepJson.back() = '}'; RepJson += '}';
+                udp_sendto(udpSock, RepJson.data(), (int)RepJson.size(), (sockaddr*)&clientudpAddr, (socklen_t)sizeof(sockaddr_in));
+                RepJson.clear();
+                RepJson = "{\"jsonrpc\":\"2.0\",\"method\":\"notify\",\"params\":{" + newVal;
+            }
+        }
+        TagIdToSend.clear();
+        SimTagUdpServerMutex.unlock();
+
+        if ((RepJson.size() >0)  && (RepJson.back() == ','))
+        {
+            RepJson.back() = '}'; RepJson += '}';
+            if (udp_sendto(udpSock, RepJson.data(), (int)RepJson.size(), (sockaddr*)&clientudpAddr, (socklen_t)sizeof(sockaddr_in)) < 0)
+                clientudpAddr.sin_family = 0xFFFF;
+        }
+    }
+
+    std::string to_string_trim(double x)
+    {
+        std::string s = std::to_string(x); // ex: "12.400000" ou "1.000000"
+
+        auto dot = s.find('.');
+        if (dot == std::string::npos) return s;
+
+        while (!s.empty() && s.back() == '0')
+            s.pop_back();
+
+        if (!s.empty() && s.back() == '.')
+            s.pop_back();
+
+        if (s == "-0") s = "0";
+
+        return s;
+    }
+
+
+    static bool parse_quoted_string(const std::string& s, std::size_t& i, std::string& out)
+    {
+        if (i >= s.size() || s[i] != '"') return false;
+        ++i; // skip opening "
+
+        std::size_t start = i;
+        while (i < s.size() && s[i] != '"') {
+            ++i;
+        }
+        if (i >= s.size()) return false; // no closing "
+
+        out = s.substr(start, i - start);
+        ++i; // skip closing "
+        return true;
+    }
+    static bool parse_number_token(const std::string& s, std::size_t& i, std::string& out)
+    {
+        if (i >= s.size()) return false;
+
+        std::size_t start = i;
+        while (i < s.size()
+            && s[i] != ','
+            && s[i] != '}')
+        {
+            ++i;
+        }
+
+        out = s.substr(start, i - start);
+        return !out.empty();
+    }
+    static bool skip_char(const std::string& s, std::size_t& i, char c) 
+    { 
+        for (;;)
+        {
+            if (i < s.size() && s[i] == c)
+            {
+                i++;
+                return true;
+            }
+            if (i==s.size())
+                return false;
+            i++;
+        }
+    }
+    // Generaly only one var at a time
+    void WriteVars(const std::string& json)
+    {
+
+        std::string line(json);
+
+        std::size_t i = 0;
+
+        // remove all spaces
+        line.erase(std::remove(line.begin(), line.end(), ' '), line.end());
+
+        if (!skip_char(line, i, '{')) // first {
+            return;
+        if (!skip_char(line, i, '{')) // second { for parameters
+            return;
+
+        while (true) {
+            // comma
+            if (i < line.size() && line[i] == ',') { ++i; continue; }
+            if (i >= line.size()) break;
+
+            // name
+            std::string name;
+            if (!parse_quoted_string(line, i, name)) {
+                return;
+            }
+
+            if (!skip_char(line, i, ':')) {
+                return;
+            }
+
+            std::string numTok;
+            if (!parse_number_token(line, i, numTok)) {
+                std::cerr << "Erreur: nombre attendu apr s " << name << "\n";
+                return;
+            }
+
+            int Idx = SimTag::findTag(name);
+            if (Idx!=-1)
+                if ((SimTag::theTagsStorage[Idx]->_operator == ' ') && (SimTag::theTagsStorage[Idx]->IsCalc() == false))
+                {
+                    double value = std::atof(numTok.c_str());
+                    SimTag::Simulator_writeTag(Idx, value); // undirect write, so pushed back in the TagIdToSend list
+                }
+
+            if (i >= line.size()) return;
+
+            if (line[i] == ',') { ++i; continue; }
+            if (line[i] == '}') { return; }
+        }
+    }
+};
 
 int SimTag::InternalVarCounter = 0;
 long SimTag::TimeStart = 0;
 bool SimTag::Firstcall = true;
 bool SimTag::Calc_Depth_reached;
 std::vector<SimTag*> SimTag::theTagsStorage;
+std::function<void(int)> SimTag::onWritelistener = nullptr;
 
 int UserdbTagCount = 0; // Used to count the number of register/unregister calls
 
+bool SimulatorSrv_Up = false;
+SimTagJsonRpcServer* SrvSimulator;
 
 ///////////////////////////////////////////////////////////
 // Begin of the interface functions similar to libplctag //
 ///////////////////////////////////////////////////////////
 int Simulator_tag_create(const char* MathOperation)
 {
+    int retcode = SimTag::GetOrCreateTags(MathOperation);
+
+    if (SimulatorSrv_Up == false)
+    {
+#if defined(_WIN32)
+        WSADATA wsaData;
+        std::ignore = WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
+        SimulatorSrv_Up = true;
+        SrvSimulator = new SimTagJsonRpcServer();
+    }
+
     if (UserdbTagCount++ <= 0)
         SimTag::SimulationStart();
 
-    return SimTag::GetOrCreateTags(MathOperation);
-
+    return retcode;
 }
+
 int Simulator_tag_destroy(int identifier)
 {
     UserdbTagCount--;
@@ -683,7 +1062,7 @@ uint64_t Simulator_tag_get_uint64(int identifier)
 
 int Simulator_tag_set_uint64(int identifier, uint64_t val)
 {
-    return SimTag::Simulator_writeTag(identifier, val);
+    return SimTag::Simulator_writeTag(identifier, (double)val);
 }
 
 int64_t Simulator_tag_get_int64(int identifier)
@@ -693,7 +1072,7 @@ int64_t Simulator_tag_get_int64(int identifier)
 
 int Simulator_tag_set_int64(int identifier, int64_t val)
 {
-    return SimTag::Simulator_writeTag(identifier, val);
+    return SimTag::Simulator_writeTag(identifier, (double)val);
 }
 
 uint32_t Simulator_tag_get_uint32(int identifier)

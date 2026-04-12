@@ -1,4 +1,5 @@
-Simulator Driver.
+Simulator and JSon-RPC server Driver 
+
 The driver is case insensitive for tag and signal names.
 Names cannot start with @. Every thing starting with a digit is converted into a constant number.
 
@@ -41,3 +42,24 @@ With simulation signal, parameters can be a tag or another signal :
        ... with an partial sinus output between 0 and 4 when the square wave is not at 0.
     var=user(4,0,1,0,var1,var2, 12, var4); var1=sinus(0.1); var2=random(); var4=4*var1
        ...sinus, then random, then a const 12 an finally the same sinus with a multiplier
+
+
+ Very basic text base protocol on udp port 55555 with the last (unique expected) client is integrated
+ JSON RPC only with notification (no request/response)
+      -receive by the server
+          advise message
+              {"jsonrpc": "2.0", "method": "advise"}
+              a data message notification will be send with all the tags/values just after
+          write message
+              {"jsonrpc": "2.0", "method": "put", "params":{"v1":value1,"v2":value2 ... }} in a single udp datagram (generaly only one tag value)
+            no response but if advise is done before (normaly it is) a value changed message is sent
+          unadvise message, not required closing the socket is OK
+              {"jsonrpc": "2.0", "method": "unadvise"}
+      -send to the client (send values of uncalculated and not internal (const or other) Tags only)
+           {"jsonrpc": "2.0", "method":"notify", "params":{"v1":value1,"v2":value2,....}} in multiples udp datagram
+Values are double numbers
+ 
+ The code here is a not a json-rpc protocol checker. A lot of false frames can be sent, we don't care about it. 
+ For instance for put it just check the word 'put' then it just find the second '{' then got the values.
+ So sending just advise or unadvise is OK and sending {put {"v1":value1,"v2":value2  is also OK (don't miss the two '{')
+Malformed messages are welcome, some working, some not. Official JSON-RPC messages are preferable !
