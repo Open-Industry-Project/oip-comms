@@ -14,6 +14,8 @@
 
 #include "oip_blocking_queue.h"
 
+struct AdsTagGroupImpl;
+
 namespace godot {
 
 class OIPComms : public Node {
@@ -52,20 +54,29 @@ private:
 
 		String protocol;
 
-		// gateway is a multi-purpose field. either the IP address of a PLC, "192.168.1.200"
-		// or the address of an OPC UA server endpoint, "opc.tcp://192.168.56.104:62541"
+		// gateway is a multi-purpose field:
+		//   PLC:    IP address of the PLC, e.g. "192.168.1.200"
+		//   OPC UA: server endpoint URL, e.g. "opc.tcp://192.168.56.104:62541"
+		//   ADS:    remote PLC IPv4 address, e.g. "192.168.1.10"
 		String gateway;
 
-		// PLC: rack/slot number, e.g. "1,2"
-		// OPC UA: unused (namespace is part of the tag name, e.g. "ns=2;i=5")
+		// path:
+		//   PLC:    rack/slot number, e.g. "1,2"
+		//   OPC UA: unused (namespace is part of the tag name, e.g. "ns=2;i=5")
+		//   ADS:    remote AmsNetId, e.g. "5.34.142.165.1.1"
 		String path;
 
+		// cpu:
+		//   PLC:    CPU type string passed to libplctag
+		//   ADS:    AMS port as a decimal string (e.g. "851" for the PLC runtime)
 		String cpu;
 		std::map<String, PlcTag> plc_tags;
 
 		UA_Client *client;
 		std::map<String, OpcUaTag> opc_ua_tags;
 
+		// Defined in oip_comms.cpp; AdsLib pulls winsock2.h, which can't reach this header.
+		AdsTagGroupImpl *ads_impl;
 	};
 	std::map<String, TagGroup> tag_groups;
 	std::vector<String> tag_group_order;
@@ -103,13 +114,18 @@ private:
 	void process_tag_group(const String &tag_group_name);
 	void process_plc_tag_group(const String &tag_group_name);
 	void process_opc_ua_tag_group(const String &tag_group_name);
+	void process_ads_tag_group(const String &tag_group_name);
 
 	bool init_plc_tag(const String &tag_group_name, const String &tag_name);
 
 	bool init_opc_ua_client(const String &tag_group_name);
 	bool init_opc_ua_tag(const String &tag_group_name, const String &tag_path);
 
+	bool init_ads_device(const String &tag_group_name);
+	bool init_ads_tag(const String &tag_group_name, const String &tag_name);
+
 	bool opc_ua_client_connected(const String &tag_group_name);
+	bool ads_device_connected(const String &tag_group_name);
 	bool tag_group_exists(const String &tag_group_name);
 	bool tag_exists(const String &tag_group_name, const String &tag_name);
 
@@ -118,7 +134,6 @@ private:
 	void flush_all_writes();
 	void flush_one_write();
 
-	// process both PLC and OPC UA writes
 	void process_write(const WriteRequest &write_req);
 
 	// process individual PLC read
@@ -139,6 +154,20 @@ private:
 	OIP_DECLARE_OPC_SET(int8)
 	OIP_DECLARE_OPC_SET(float64)
 	OIP_DECLARE_OPC_SET(float32)
+
+#define OIP_DECLARE_ADS_SET(a)void ads_tag_set_##a(const String &tag_group_name, const String &tag_path, const godot::Variant value);
+
+	OIP_DECLARE_ADS_SET(bit)
+	OIP_DECLARE_ADS_SET(uint64)
+	OIP_DECLARE_ADS_SET(int64)
+	OIP_DECLARE_ADS_SET(uint32)
+	OIP_DECLARE_ADS_SET(int32)
+	OIP_DECLARE_ADS_SET(uint16)
+	OIP_DECLARE_ADS_SET(int16)
+	OIP_DECLARE_ADS_SET(uint8)
+	OIP_DECLARE_ADS_SET(int8)
+	OIP_DECLARE_ADS_SET(float64)
+	OIP_DECLARE_ADS_SET(float32)
 
 	void cleanup_tag_groups();
 	void cleanup_tag_group(const String &tag_group_name);

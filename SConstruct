@@ -35,14 +35,39 @@ Run the following command to download godot-cpp:
 
 env = SConscript("godot-cpp/SConstruct", {"env": env, "customs": customs})
 
-env.Append(CPPPATH=["src/"])
+env.Append(CPPPATH=["src/", "ads/AdsLib/"])
 env.Append(LIBPATH=["lib/"])
 env.Append(LIBS=["plctag", "open62541"])
+env.Append(CPPDEFINES=[("CONFIG_DEFAULT_LOGLEVEL", "1")])
+
+# ADS variant selection. On Windows we use Beckhoff's installed TcAdsDll because
+# TC3 4026's Secure ADS enforcement silently drops the standalone library's plain-TCP
+# requests. On Linux/macOS, TcAdsDll is unavailable, so we fall back to the standalone
+# library, which works correctly when connecting to a remote TwinCAT system (its
+# documented use case).
+ads_sources_dir = "ads/AdsLib/standalone"
 if env["platform"] == "windows":
-    env.Append(CXXFLAGS=["/MT"])
+    env.Append(CXXFLAGS=["/MT", "/EHsc"])
+    env.Append(LIBS=["ws2_32"])
+    env.Append(CPPDEFINES=["USE_TWINCAT_ROUTER"])
+    beckhoff_ads_root = "C:/Program Files (x86)/Beckhoff/TwinCAT/AdsApi/TcAdsDll"
+    env.Append(CPPPATH=[beckhoff_ads_root + "/Include"])
+    env.Append(LIBPATH=[beckhoff_ads_root + "/Lib/x64"])
+    env.Append(LIBS=["TcAdsDll", "delayimp", "Advapi32"])
+    # Delay-load TcAdsDll so the import isn't resolved at our DLL's load time;
+    # register_types.cpp's preload_tc_ads_dll() runs first and pulls TcAdsDll.dll
+    # in from its standard install path, sidestepping any PATH-staleness in the
+    # host process (e.g., Godot started before TwinCAT was installed).
+    env.Append(LINKFLAGS=["/DELAYLOAD:TcAdsDll.dll"])
+    ads_sources_dir = "ads/AdsLib/TwinCAT"
 else:
     env.Append(LINKFLAGS=["-static"])
-sources = Glob("src/*.cpp")
+sources = (
+    Glob("src/*.cpp")
+    + Glob("ads/AdsLib/*.cpp")
+    + Glob("ads/AdsLib/bhf/*.cpp")
+    + Glob(ads_sources_dir + "/*.cpp")
+)
 
 if env["target"] in ["editor", "template_debug"]:
     try:

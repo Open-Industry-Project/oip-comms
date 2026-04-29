@@ -1,5 +1,6 @@
 #include "register_types.h"
 #include "oip_comms.h"
+#include "tcads_loader.h"
 
 #include <gdextension_interface.h>
 #include <godot_cpp/core/class_db.hpp>
@@ -36,6 +37,8 @@ extern "C"
 	// Initialization
 	GDExtensionBool GDE_EXPORT oip_comms_init(GDExtensionInterfaceGetProcAddress p_get_proc_address, GDExtensionClassLibraryPtr p_library, GDExtensionInitialization *r_initialization)
 	{
+		preload_tc_ads_dll();
+
 		GDExtensionBinding::InitObject init_obj(p_get_proc_address, p_library, r_initialization);
 		init_obj.register_initializer(initialize_gdextension_types);
 		init_obj.register_terminator(uninitialize_gdextension_types);

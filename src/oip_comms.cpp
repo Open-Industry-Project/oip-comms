@@ -7,6 +7,62 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
 
+#include "AdsLib.h"
+#include "AdsDevice.h"
+#include "AdsException.h"
+#include "tcads_loader.h"
+#include <memory>
+#include <optional>
+
+struct AdsTagEntry {
+	bool initialized = false;
+	std::optional<AdsHandle> handle;
+	uint32_t size = 0;
+	std::vector<uint8_t> value;
+	bool dirty = false;
+};
+
+struct AdsTagGroupImpl {
+	std::unique_ptr<AdsDevice> client;
+	std::map<godot::String, AdsTagEntry> tags;
+};
+
+static godot::String ads_err_name(long err) {
+	switch ((uint32_t)err) {
+		case 0x6:   return "Target port not found (TwinCAT not running, or wrong AMS port)";
+		case 0x7:   return "Target machine not found (AMS route missing)";
+		case 0xF:   return "Invalid AmsNetId";
+		case 0x12:  return "Port disabled (TwinCAT in Config mode? Or PLC project not activated?)";
+		case 0x19:  return "Out of memory";
+		case 0x1B:  return "Host unreachable";
+		case 0x700: return "Device error";
+		case 0x701: return "Service not supported";
+		case 0x702: return "Invalid index group";
+		case 0x703: return "Invalid index offset / handle";
+		case 0x704: return "Read/write access denied";
+		case 0x705: return "Invalid data size";
+		case 0x706: return "Invalid data";
+		case 0x707: return "Device not ready (runtime not in Run mode?)";
+		case 0x708: return "Device busy";
+		case 0x70A: return "Out of memory";
+		case 0x70B: return "Invalid parameter";
+		case 0x70C: return "Not found";
+		case 0x70D: return "Syntax error";
+		case 0x710: return "Symbol not found";
+		case 0x711: return "Invalid symbol version (try clearing tag groups)";
+		case 0x712: return "Invalid state";
+		case 0x718: return "Device not initialized";
+		case 0x719: return "Device timeout";
+		case 0x721: return "Invalid array index";
+		case 0x722: return "Symbol not active (try clearing tag groups)";
+		case 0x723: return "Access denied";
+		case 0x745: return "Sync timeout (no response)";
+		case 0x748: return "Port not open";
+		case 0x749: return "No AMS address (route not configured?)";
+		default:    return "ADS error";
+	}
+}
+
 using namespace godot;
 
 OIPComms::OIPComms() {
@@ -57,6 +113,11 @@ void OIPComms::cleanup_tag_group(const String &tag_group_name) {
 		}
 		tag_group.opc_ua_tags.clear();
 
+	} else if (tag_group.protocol == "ads") {
+		if (tag_group.ads_impl != nullptr) {
+			delete tag_group.ads_impl;
+			tag_group.ads_impl = nullptr;
+		}
 	} else if (tag_group.protocol == "s7") {
 		for (auto &x : tag_group.plc_tags) {
 			PlcTag &tag = x.second;
@@ -193,9 +254,41 @@ OIP_OPC_SET(int8, int8_t, SBYTE, INT)
 OIP_OPC_SET(float64, double, DOUBLE, FLOAT)
 OIP_OPC_SET(float32, float, FLOAT, FLOAT)
 
+#define OIP_ADS_SET(a, b, d) \
+void OIPComms::ads_tag_set_##a(const String &tag_group_name, const String &tag_path, const godot::Variant value) { \
+	if (value.get_type() != Variant::##d) {                                                 \
+		print("OIP Comms: Supplied data type incorrect for " + tag_path, true);             \
+		return;                                                                              \
+	}                                                                                        \
+	TagGroup &tag_group = tag_groups[tag_group_name];                                        \
+	if (tag_group.ads_impl == nullptr || tag_group.ads_impl->client == nullptr) return;      \
+	auto it = tag_group.ads_impl->tags.find(tag_path);                                       \
+	if (it == tag_group.ads_impl->tags.end()) return;                                        \
+	AdsTagEntry &tag = it->second;                                                           \
+	if (!tag.initialized || !tag.handle.has_value()) return;                                 \
+	b raw = (b)value;                                                                        \
+	long err = tag_group.ads_impl->client->WriteReqEx(                                       \
+		ADSIGRP_SYM_VALBYHND, **tag.handle, sizeof(raw), &raw);                              \
+	if (err) print("ADS write failed for " + tag_path + ": " + ads_err_name(err) + " (err 0x" + String::num_int64(err, 16) + ")", true); \
+}
+
+OIP_ADS_SET(bit, bool, BOOL)
+OIP_ADS_SET(uint64, uint64_t, INT)
+OIP_ADS_SET(int64, int64_t, INT)
+OIP_ADS_SET(uint32, uint32_t, INT)
+OIP_ADS_SET(int32, int32_t, INT)
+OIP_ADS_SET(uint16, uint16_t, INT)
+OIP_ADS_SET(int16, int16_t, INT)
+OIP_ADS_SET(uint8, uint8_t, INT)
+OIP_ADS_SET(int8, int8_t, INT)
+OIP_ADS_SET(float64, double, FLOAT)
+OIP_ADS_SET(float32, float, FLOAT)
+
 #define OIP_SET_CALL(a)                                                             \
 if (tag_group.protocol == "opc_ua") {                                               \
 	opc_tag_set_##a(write_req.tag_group_name, write_req.tag_name, write_req.value); \
+} else if (tag_group.protocol == "ads") {                                           \
+	ads_tag_set_##a(write_req.tag_group_name, write_req.tag_name, write_req.value); \
 } else if (tag_group.protocol == "s7") {                                            \
 		if (tag_pointer >= 0) S7_tag_set_##a(tag_pointer, write_req.value);         \
 }                                                                                   \
@@ -207,7 +300,7 @@ void OIPComms::process_write(const WriteRequest &write_req) {
 	TagGroup &tag_group = tag_groups[write_req.tag_group_name];
 
 	int32_t tag_pointer = -1;
-	if (tag_group.protocol != "opc_ua") {
+	if (tag_group.protocol != "opc_ua" && tag_group.protocol != "ads") {
 		PlcTag &tag = tag_group.plc_tags[write_req.tag_name];
 		tag_pointer = tag.tag_pointer;
 	}
@@ -248,9 +341,9 @@ void OIPComms::process_write(const WriteRequest &write_req) {
 			break;
 	}
 
-	// this code only need for PLC interface - the above code is "setting" the data in memory
-	// this code actually writes to the PLC tags
-	if (tag_group.protocol != "opc_ua") {
+	// libplctag and S7 cache the value above; this issues the actual network write.
+	// opc_ua and ads write inline in their per-type set helpers.
+	if (tag_group.protocol != "opc_ua" && tag_group.protocol != "ads") {
 		if (tag_group.protocol == "s7"){
 			if (tag_pointer >= 0 && S7_tag_write(tag_pointer) == PLCTAG_STATUS_OK) {
 				tag_groups[write_req.tag_group_name].plc_tags[write_req.tag_name].dirty = true;
@@ -277,6 +370,8 @@ void OIPComms::process_tag_group(const String &tag_group_name) {
 
 	if (tag_group.protocol == "opc_ua") {
 		process_opc_ua_tag_group(tag_group_name);
+	} else if (tag_group.protocol == "ads") {
+		process_ads_tag_group(tag_group_name);
 	} else {
 		process_plc_tag_group(tag_group_name);
 	}
@@ -454,6 +549,158 @@ bool OIPComms::opc_ua_client_connected(const String &tag_group_name) {
 	return true;
 }
 
+bool OIPComms::ads_device_connected(const String &tag_group_name) {
+	TagGroup &tag_group = tag_groups[tag_group_name];
+	return tag_group.ads_impl != nullptr && tag_group.ads_impl->client != nullptr;
+}
+
+bool OIPComms::init_ads_device(const String &tag_group_name) {
+	if (!is_tc_ads_dll_available()) {
+		print("ADS protocol unavailable: TwinCAT 3 not installed (TcAdsDll.dll not found). Set OIP_TCADSDLL_PATH to override, or install TwinCAT 3 to use the 'ads' protocol.", true);
+		return false;
+	}
+
+	TagGroup &tag_group = tag_groups[tag_group_name];
+	if (tag_group.ads_impl == nullptr)
+		tag_group.ads_impl = new AdsTagGroupImpl();
+
+	for (auto &x : tag_group.ads_impl->tags) {
+		AdsTagEntry &tag = x.second;
+		tag.handle.reset();
+		tag.initialized = false;
+	}
+	tag_group.ads_impl->client.reset();
+
+	CharString ipv4_utf8 = tag_group.gateway.utf8();
+	CharString net_id_utf8 = tag_group.path.utf8();
+	const int port_int = tag_group.cpu.to_int();
+	if (port_int <= 0 || port_int > 0xFFFF) {
+		print("ADS port invalid (cpu field): " + tag_group.cpu, true);
+		return false;
+	}
+	const uint16_t port = (uint16_t)port_int;
+
+	try {
+		// make_AmsNetId returns all-zeros for any malformed input.
+		AmsNetId net_id = make_AmsNetId(std::string(net_id_utf8.get_data()));
+		bool all_zero = true;
+		for (int i = 0; i < 6; ++i) if (net_id.b[i]) { all_zero = false; break; }
+		if (all_zero) {
+			print("ADS AmsNetId invalid (path field): " + tag_group.path, true);
+			return false;
+		}
+		tag_group.ads_impl->client.reset(
+			new AdsDevice(std::string(ipv4_utf8.get_data()), net_id, port));
+	} catch (const AdsException &e) {
+		print("ADS connect failed for " + tag_group_name + ": " + String(e.what()), true);
+		tag_group.ads_impl->client.reset();
+		return false;
+	} catch (const std::exception &e) {
+		print("ADS connect error for " + tag_group_name + ": " + String(e.what()), true);
+		tag_group.ads_impl->client.reset();
+		return false;
+	}
+	print("ADS connected to " + tag_group.gateway + ":" + tag_group.cpu + " (AmsNetId " + tag_group.path + ")");
+	// Log our local AmsNetId so the user can see what to register in the PLC's route table.
+	AmsAddr local_addr = {};
+	if (AdsGetLocalAddressEx(tag_group.ads_impl->client->GetLocalPort(), &local_addr) == 0) {
+		const String local_netid =
+			itos(local_addr.netId.b[0]) + "." +
+			itos(local_addr.netId.b[1]) + "." +
+			itos(local_addr.netId.b[2]) + "." +
+			itos(local_addr.netId.b[3]) + "." +
+			itos(local_addr.netId.b[4]) + "." +
+			itos(local_addr.netId.b[5]);
+		print("ADS local AmsNetId: " + local_netid);
+	}
+	return true;
+}
+
+bool OIPComms::init_ads_tag(const String &tag_group_name, const String &tag_name) {
+	TagGroup &tag_group = tag_groups[tag_group_name];
+	if (tag_group.ads_impl == nullptr || tag_group.ads_impl->client == nullptr)
+		return false;
+	AdsDevice &device = *tag_group.ads_impl->client;
+	AdsTagEntry &tag = tag_group.ads_impl->tags[tag_name];
+
+	CharString name_utf8 = tag_name.utf8();
+	const std::string name_std(name_utf8.get_data(), name_utf8.length());
+
+	try {
+		std::vector<uint8_t> info_buf(1024, 0);
+		uint32_t bytes_read = 0;
+		long err = device.ReadWriteReqEx2(
+			ADSIGRP_SYM_INFOBYNAMEEX, 0,
+			info_buf.size(), info_buf.data(),
+			name_std.size() + 1, name_std.c_str(),
+			&bytes_read);
+		if (err) {
+			print("ADS symbol info failed for " + tag_name + ": " + ads_err_name(err) + " (err 0x" + String::num_int64(err, 16) + ")", true);
+			return false;
+		}
+		if (bytes_read < sizeof(AdsSymbolEntry)) {
+			print("ADS symbol info short response for " + tag_name + " (got " + itos((int64_t)bytes_read) + " bytes)", true);
+			return false;
+		}
+		const AdsSymbolEntry *entry = reinterpret_cast<const AdsSymbolEntry *>(info_buf.data());
+		// BOOL reports size 0 in AdsSymbolEntry; promote to 1 byte for transport.
+		tag.size = entry->size > 0 ? entry->size : 1;
+		tag.value.assign(tag.size, 0);
+
+		tag.handle.emplace(device.GetHandle(name_std));
+	} catch (const AdsException &e) {
+		print("ADS init tag failed for " + tag_name + ": " + String(e.what()), true);
+		return false;
+	}
+
+	tag.initialized = true;
+	tag_group.init_count++;
+	return true;
+}
+
+void OIPComms::process_ads_tag_group(const String &tag_group_name) {
+	TagGroup &tag_group = tag_groups[tag_group_name];
+
+	if (!ads_device_connected(tag_group_name)) {
+		if (!init_ads_device(tag_group_name))
+			return;
+	}
+
+	if (tag_group.ads_impl == nullptr || tag_group.ads_impl->client == nullptr)
+		return;
+	AdsDevice &device = *tag_group.ads_impl->client;
+
+	for (auto &x : tag_group.ads_impl->tags) {
+		const String tag_name = x.first;
+		AdsTagEntry &tag = x.second;
+
+		if (!tag.initialized) {
+			if (!init_ads_tag(tag_group_name, tag_name)) {
+				tag_group.has_error = true;
+				return;
+			}
+		}
+
+		if (tag.initialized && tag.handle.has_value()) {
+			uint32_t bytes_read = 0;
+			long err = device.ReadReqEx2(
+				ADSIGRP_SYM_VALBYHND, **tag.handle,
+				tag.size, tag.value.data(), &bytes_read);
+			if (err) {
+				print("ADS read failed for " + tag_name + ": " + ads_err_name(err) + " (err 0x" + String::num_int64(err, 16) + ")", true);
+				tag_group.has_error = true;
+				return;
+			}
+			if (bytes_read != tag.size) {
+				print("ADS short read on " + tag_name + ": expected " + itos((int64_t)tag.size) + " bytes, got " + itos((int64_t)bytes_read), true);
+				tag_group.has_error = true;
+				return;
+			}
+			tag.dirty = false;
+		}
+	}
+}
+
 bool OIPComms::tag_group_exists(const String& tag_group_name) {
 	return tag_groups.find(tag_group_name) != tag_groups.end();
 }
@@ -463,6 +710,9 @@ bool OIPComms::tag_exists(const String& tag_group_name, const String& tag_name) 
 		TagGroup &tag_group = tag_groups[tag_group_name];
 		if (tag_group.protocol == "opc_ua") {
 			return tag_group.opc_ua_tags.find(tag_name) != tag_group.opc_ua_tags.end();
+		} else if (tag_group.protocol == "ads") {
+			if (tag_group.ads_impl == nullptr) return false;
+			return tag_group.ads_impl->tags.find(tag_name) != tag_group.ads_impl->tags.end();
 		} else {
 			return tag_group.plc_tags.find(tag_name) != tag_group.plc_tags.end();
 		}
@@ -504,6 +754,8 @@ void OIPComms::process() {
 				size_t total_tag_count = 0;
 				if (tag_group.protocol == "opc_ua")
 					total_tag_count = tag_group.opc_ua_tags.size();
+				else if (tag_group.protocol == "ads")
+					total_tag_count = tag_group.ads_impl ? tag_group.ads_impl->tags.size() : 0;
 				else
 					total_tag_count = tag_group.plc_tags.size();
 
@@ -627,7 +879,9 @@ void OIPComms::register_tag_group(const String p_tag_group_name, const int p_pol
 		std::map<String, PlcTag>(),
 
 		nullptr,
-		std::map<String, OpcUaTag>()
+		std::map<String, OpcUaTag>(),
+
+		nullptr
 	};
 
 	if (!tag_group_exists(p_tag_group_name))
@@ -647,6 +901,10 @@ bool OIPComms::register_tag(const String p_tag_group_name, const String p_tag_na
 			if (tag_group.protocol == "opc_ua") {
 				OpcUaTag tag = { false, UA_NODEID_NULL, { 0 } };
 				tag_group.opc_ua_tags[p_tag_name] = tag;
+			} else if (tag_group.protocol == "ads") {
+				if (tag_group.ads_impl == nullptr)
+					tag_group.ads_impl = new AdsTagGroupImpl();
+				tag_group.ads_impl->tags[p_tag_name];
 			} else {
 				PlcTag tag = { false, -1, p_elem_count, false };
 				tag_group.plc_tags[p_tag_name] = tag;
@@ -948,6 +1206,18 @@ Dictionary OIPComms::browse_node_info(const String p_node_id) {
 					tag_group.has_error = true;                                   \
 				}                                                                 \
 				return 0.0;                                                       \
+			} else if (tag_group.protocol == "ads") {                              \
+				if (tag_group.ads_impl == nullptr) return 0.0;                     \
+				AdsTagEntry &tag = tag_group.ads_impl->tags[p_tag_name];           \
+				if (tag.initialized) {                                             \
+					if (tag.value.size() != sizeof(b)) {                           \
+						print("Type mismatch on " + p_tag_name + ": symbol is " + itos((int64_t)tag.value.size()) + " bytes, but read_" #a " (" + itos((int64_t)sizeof(b)) + " bytes) was called", true); \
+						tag_group.has_error = true;                                \
+						return 0.0;                                                \
+					}                                                              \
+					return *reinterpret_cast<const b *>(tag.value.data());         \
+				}                                                                  \
+				return 0.0;                                                        \
 			} else if (tag_group.protocol == "s7") {                              \
 				PlcTag tag = tag_group.plc_tags[p_tag_name];                      \
 				if (tag.initialized) {                                            \

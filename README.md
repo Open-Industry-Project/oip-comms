@@ -1,7 +1,16 @@
 # Open Industry Project - GDextension Component
-This component is for the Open Industry Project (OIP). It enables communications with the following two other libraries. Both are built from source from the following commits:
+This component is for the Open Industry Project (OIP). It enables communications with the following libraries:
+
+Prebuilt and dropped into `lib/` (built from source from these commits):
 - https://github.com/libplctag/libplctag/commit/c55bc5876d938dda1c609750cde5ae4812d7b8a8
 - https://github.com/open62541/open62541/commit/de932080cf1264748b5b757dd7e87e422c4df0aa
+
+Tracked as a git submodule under `ads/` and compiled from source with the rest of the project:
+- https://github.com/Beckhoff/ADS
+
+The Beckhoff ADS library has two variants and the build picks one per platform:
+- **Windows**: links against the locally-installed `TcAdsDll.dll` (Beckhoff's official client) via the `USE_TWINCAT_ROUTER` define. Required because TwinCAT 3 build 4026 enforces Secure ADS, and the standalone library only speaks plain TCP — its requests are silently dropped by 4026's runtime. Requires TwinCAT to be installed locally; `TcAdsDll.dll` is bundled alongside the GDExtension at distribution time so end-users without a TwinCAT install on PATH still load it.
+- **Linux / macOS**: uses the standalone library (its own AmsRouter, plain TCP). This is the standalone lib's documented use case — connecting from a non-TwinCAT host to a remote TwinCAT system. A route entry must be configured on the remote TwinCAT for the local AmsNetId.
 
 See PR on Open Industry Project [https://github.com/open62541/open62541](https://github.com/Open-Industry-Project/Open-Industry-Project/pull/161)
 
@@ -9,6 +18,10 @@ See PR on Open Industry Project [https://github.com/open62541/open62541](https:/
 Please read Godot's documentation on building from source and GDextension:
 - https://docs.godotengine.org/en/stable/contributing/development/compiling/index.html
 - https://docs.godotengine.org/en/stable/tutorials/scripting/gdextension/gdextension_cpp_example.html
+
+After cloning, fetch the submodules (`godot-cpp` and `ads`):
+
+`git submodule update --init --recursive`
 
 Build command:
 `scons platform=windows debug_symbols=yes`

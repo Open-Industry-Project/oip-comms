@@ -156,6 +156,7 @@
 			[b]EtherNet/IP ([code]ab_eip[/code]):[/b] A CIP tag name as defined in the PLC program (e.g. [code]MyTag[/code], [code]Program:MainProgram.MyTag[/code], [code]myUDT.field[/code], [code]myArray[0][/code]).
 			[b]Modbus TCP ([code]modbus_tcp[/code]):[/b] A register type prefix followed by the register number: [code]co[/code] (coil), [code]di[/code] (discrete input), [code]hr[/code] (holding register), or [code]ir[/code] (input register). For example: [code]hr0[/code], [code]co21[/code].
 			[b]OPC UA ([code]opc_ua[/code]):[/b] The full OPC UA node ID in standard notation. Use [code]ns=X;i=Y[/code] or [code]ns=X;s=Y[/code] with a numeric namespace index, or [code]nsu=URI;i=Y[/code] or [code]nsu=URI;s=Y[/code] with a namespace URI. For example: [code]ns=2;i=12345[/code], [code]ns=2;s=MyVariable[/code], or [code]nsu=CODESYSSPV3/3S/IecVarAccess;s=|var|MyApp.PLC_PRG.myVar[/code].
+			[b]Beckhoff ADS ([code]ads[/code]):[/b] A symbol path as it appears in the TwinCAT runtime, e.g. [code]MAIN.fbMotor.bRunning[/code] or [code]GVL_IO.iCounter[/code]. Only scalar primitive types (BOOL, BYTE/SINT/USINT, INT/UINT, DINT/UDINT, LINT/ULINT, REAL, LREAL) are supported.
 			[i]Note: [code]elem_count[/code] is not currently implemented. This will be future work if array reads/writes are needed.[/i]
 			</description>
 		</method>
@@ -171,7 +172,8 @@
 			Register a tag group. Valid values for [code]protocol[/code] are:
 			- [code]ab_eip[/code]
 			- [code]modbus_tcp[/code]
-			- [code]opc_ua[/code].
+			- [code]opc_ua[/code]
+			- [code]ads[/code]
 			[code]gateway[/code], [code]path[/code] and [code]cpu[/code] are multi-use fields.
 			When the protocol is [code]ab_eip[/code] or [code]modbus_tcp[/code], the [code]gateway[/code] is the IP address of the target device (typically a PLC), the [code]path[/code] is the path (rack/slot) to a processor, and the [code]cpu[/code] may be one of the following values:
 			- [code]ControlLogix[/code]
@@ -182,6 +184,7 @@
 			- [code]MicroLogix[/code]
 			- [code]Omron[/code]
 			When the protocol is [code]opc_ua[/code], the [code]gateway[/code] is the OPC UA server's endpoint (e.g. [code]opc.tcp://192.168.1.100:4840[/code]). The [code]path[/code] and [code]cpu[/code] fields are not used (the namespace is part of each tag's node ID).
+			When the protocol is [code]ads[/code], the [code]gateway[/code] is the remote PLC's IPv4 address (e.g. [code]192.168.1.10[/code]), the [code]path[/code] is the AmsNetId of the remote runtime (e.g. [code]5.34.142.165.1.1[/code]), and the [code]cpu[/code] is the AMS port as a decimal string ([code]851[/code] for the TwinCAT 3 PLC runtime, [code]801[/code] for TwinCAT 2). Note: a route from the local machine to the remote PLC must be configured on the PLC side first.
 			</description>
 		</method>
 		<method name="set_enable_comms">
