@@ -85,9 +85,10 @@ private:
     char _operator; // ten operators : + - * / % ^ | & ! # and ~ same as ! changed somwhere in the code. 
     // # and space (no op.) is for only one member such as var1=var2 ... could be done just with var2
 
-    // var1=(var2+var3)*(var4-var5) ->  2 by 2 decomposition can be done by the user,
-    // no problem for programmers.
+    // var1=(var2+var3)*(var4-var5) 
+    // decomposition can be done by the user if needed
     // var1=var1_1*var1_2; var1_1=var2+var3; var1_2=var4-var5
+    // otherwise it's done with internal anonymous tags but without operator precedence order
     SimTag *operandleft, *operandright;
     bool invertleft, invertright; // only used for boolean
 
@@ -126,50 +127,51 @@ private:
         if (_Name.front() == '@') // anonymous Tag, cannot be reuse, normaly at least leftop is not null
             Name = "@"+std::to_string(InternalVarCounter++);
         else
+        {
             Name = _Name;
 
-        // is it a function ?
-        func = nullptr;
-        for (int i=0;i<(int)std::size(functionNames);i++)
-          if ((Name.find(functionNames[i]+"(")==0)&&(Name.back()==')'))
-          {
-            switch (i) // much readable to do than with an array of function pointers
-            {
-              case 0 : func = &SimTag::Random; double rd;memset(&rd,255,8);Val=rd;break;
-              case 1 : func = &SimTag::Square;break;
-              case 2 : func = &SimTag::Sin;break;
-              case 3 : func = &SimTag::Triangle;break;
-              case 4 : func = &SimTag::Sawtooth;break;
-              case 5 : func = &SimTag::UserSignal;break;
-              case 6 : func = &SimTag::TimerOn;break;
-              case 7 : func = &SimTag::TimerOff;Val=-10000000;break;
-              case 8 : func = &SimTag::TimerPulse;break;
-              case 9 : func = &SimTag::Bistable_RS;break;
-              case 10: func = &SimTag::Bistable_SR;break;
-              case 11: func = &SimTag::Count; double ct;memset(&ct,255,8);Val=ct;break; 
-              case 12: func = &SimTag::CompareEQ;break; // ==
-              case 13: func = &SimTag::CompareGT;break; // >
-              case 14: func = &SimTag::CompareGE;break; // >=
-              case 15: func = &SimTag::CompareLT;break; // <
-              case 16: func = &SimTag::CompareLE;break; // <=
-              case 17: func = &SimTag::CompareNE;break; // !=
-              case 18: func = &SimTag::Prev;break; 
-            }
-            extractFuncParamFromString(Name);
-            if (i!=5)
-              UserfuncValueTags.clear();
+            // is it a function ?
+            func = nullptr;
+            for (int i = 0; i < (int)std::size(functionNames); i++)
+                if ((Name.back() == ')') && (Name.find(functionNames[i] + "(") == 0))
+                {
+                    switch (i) // much readable to do than with an array of function pointers
+                    {
+                    case 0: func = &SimTag::Random; double rd; memset(&rd, 255, 8); Val = rd; break;
+                    case 1: func = &SimTag::Square; break;
+                    case 2: func = &SimTag::Sin; break;
+                    case 3: func = &SimTag::Triangle; break;
+                    case 4: func = &SimTag::Sawtooth; break;
+                    case 5: func = &SimTag::UserSignal; break;
+                    case 6: func = &SimTag::TimerOn; break;
+                    case 7: func = &SimTag::TimerOff; Val = -10000000; break;
+                    case 8: func = &SimTag::TimerPulse; break;
+                    case 9: func = &SimTag::Bistable_RS; break;
+                    case 10: func = &SimTag::Bistable_SR; break;
+                    case 11: func = &SimTag::Count; double ct; memset(&ct, 255, 8); Val = ct; break;
+                    case 12: func = &SimTag::CompareEQ; break; // ==
+                    case 13: func = &SimTag::CompareGT; break; // >
+                    case 14: func = &SimTag::CompareGE; break; // >=
+                    case 15: func = &SimTag::CompareLT; break; // <
+                    case 16: func = &SimTag::CompareLE; break; // <=
+                    case 17: func = &SimTag::CompareNE; break; // !=
+                    case 18: func = &SimTag::Prev; break;
+                    }
+                    extractFuncParamFromString(Name);
+                    if (i != 5)
+                        UserfuncValueTags.clear();
 
-            return;
-          }
+                    return;
+                }
 
-        // constant values are welcome
-        // not working with true & false, so pushed back before
-        const char* str = Name.c_str();
-        char* end;
-        Val = std::strtod(str, &end);
-        if (end != str) 
-            IsConst = true;
-
+            // constant values are welcome
+            // not working with true & false, so pushed back before
+            const char* str = Name.c_str();
+            char* end;
+            Val = std::strtod(str, &end);
+            if (end != str)
+                IsConst = true;
+        }
         _operator = __operator;
         operandleft = operandright = nullptr;
         UpdateTag(_operator, leftop, rigthtop, invleft, invright);
@@ -258,6 +260,17 @@ public:
 
         // remove all space chars
         MathOperations.erase(std::remove(MathOperations.begin(), MathOperations.end(), ' '), MathOperations.end());
+
+        // all in lowercase
+        std::transform(MathOperations.begin(), MathOperations.end(), MathOperations.begin(),
+            [](unsigned char c) { return std::tolower(c); });
+
+        // replace all accepted ~ by !
+        size_t pos = 0;
+        while ((pos = MathOperations.find('~', pos)) != std::string::npos) {
+            MathOperations.replace(pos, 1, "!");
+            pos += 1; 
+        }
 
         // split if several lines of code are given (separated by ;)
         std::vector<std::string> elements = splitString(MathOperations);
@@ -359,15 +372,9 @@ private:
     }
     static int GetOrCreateTag(std::string MathOperation)
     {
-        // Don't accept this, it's very hard from the user to show it will create an hidden var
-        if (MathOperation.front() == '=') return -1; // Another way could be MathOperation=MathOperation.substr(1)
-        if ((MathOperation.front() == '!') || (MathOperation.front() == '~')) return -1;
 
-        // all in lowercase
-        std::transform(MathOperation.begin(), MathOperation.end(), MathOperation.begin(),
-            [](unsigned char c) { return std::tolower(c); });
-        // remove all space
-        MathOperation.erase(std::remove(MathOperation.begin(), MathOperation.end(), ' '), MathOperation.end());
+        // Don't accept this, it's very hard from the user to show it will create an hidden var
+        if (MathOperation.front() == '=') return -1;
 
         // Get [] with var1 or var1,operator,var2 or var1,operator,var2,var3
         std::vector<std::string> components = parseMathOperation(MathOperation);
@@ -384,10 +391,6 @@ private:
             }
             else
             {
-                //// No more exist, removed
-                //if (components[0][0] == '!') // ~var1, creates a internal tag with operation
-                //    return GetOrCreateTag("@="+components[0], Tags);
-
                 SimTag* Tag = new SimTag(components[0]);
                 theTagsStorage.push_back(Tag);
                 return (int)theTagsStorage.size()-1;
@@ -783,7 +786,10 @@ private:
         }
         return tokens;
     }
-    static size_t findoperatoratlevel0(const std::string st)
+
+    enum operatortype { lowpriority =1, highpriority = 2, allpriority = 3};
+
+    static size_t findoperatoratlevel0(const std::string st, operatortype typeop)
     {
         int level = 0;
 
@@ -791,31 +797,43 @@ private:
         {
             if (st[i] == '(') level++;
             else if (st[i] == ')') level--;
-            else if (level==0)
-                if (st[i] == '+' || st[i] == '-' || st[i] == '*' || st[i] == '/' || st[i] == '%'
-                    || st[i] == '^' || st[i] == '&' || st[i] == '|')
+            else if (level == 0)
+            {
+                if (((typeop & 1) == lowpriority) && (st[i] == '+' || st[i] == '-' || st[i] == '^' || st[i] == '|'))
                     return i;
+                if (((typeop & 2) == highpriority) && (st[i] == '*' || st[i] == '/' || st[i] == '%' || st[i] == '&'))
+                    return i;
+            }
             if (level < 0) return std::string::npos;
         }
         return std::string::npos;
     }
-
+   
     static std::vector<std::string> parseMathOperation(const std::string& operation)
     {
         std::vector<std::string> components;
 
-        // Find the = symbol 
+        // Find the equal symbol 
         size_t assignPos = operation.find('=');
-        if (assignPos == std::string::npos)
-            if (findoperatoratlevel0(operation) == std::string::npos) // it's a simple var usage "var1" or a function call
+        if (assignPos == std::string::npos) // no equal symbol
+            if (findoperatoratlevel0(operation, allpriority) == std::string::npos) // no operator at first level
             {
-                components.push_back(operation);
-                return components;
+                if (operation.front() != '!')
+                {
+                    if ((operation.front() == '(') && (operation.back() == ')'))
+                        return parseMathOperation(operation.substr(1, operation.size() - 2)); // unnecessary ( ) at this level
+                    else
+                    {
+                        components.push_back(operation); // it's a simple var usage "var1" or a function call
+                        return components;
+                    }
+                }
+                else
+                    return parseMathOperation("@@=" + operation); // it's a var usage "!var1" change it to add an anonymous variable
             }
-            else
-                return parseMathOperation("@@=" + operation); // it's something like var1*var2 change it to add an anonymous variable
+        // else it's something like var1*var2 or more complex : continue
 
-        // get affected variable (before = symbol)
+        // get affected variable (before = symbol) or all if symbol = was not found (Tagname could be var1*var2)
         std::string leftVar = operation.substr(0, assignPos);
 
         if (!leftVar.empty())
@@ -826,13 +844,21 @@ private:
         // get the mathematical operation (after = symbol)
         std::string rightPart = operation.substr(assignPos + 1);
 
-        // find the operator position
-        size_t opPos = findoperatoratlevel0(rightPart);
+        if (rightPart.empty()) rightPart = "0";
 
-        if (opPos == std::string::npos) 
+        // find the operator position at this level (try to cut in respect of operator priority)
+        // neutral value when a member is missing, not realy OK for %
+        std::string neutral = "0";
+        size_t opPos = findoperatoratlevel0(rightPart,lowpriority);
+        if (opPos == std::string::npos)
         {
-            // Return only the var name, but change ~ by !
-            if (rightPart.front() == '~') rightPart.front() = '!';
+            neutral = "1";
+            opPos = findoperatoratlevel0(rightPart, highpriority);
+        }
+
+        if (opPos == std::string::npos) // such as var1=var2 or var1=!var2
+        {
+            // Return only the var name
             components.push_back(rightPart);
             return components; 
         }
@@ -844,6 +870,9 @@ private:
         // cut in two : var names before and after the operator
         std::string rightVar1 = rightPart.substr(0, opPos);
         std::string rightVar2 = rightPart.substr(opPos + 1);
+
+        if (rightVar1.empty()) rightVar1 = neutral; // if nothing found before or after the operator
+        if (rightVar2.empty()) rightVar2 = neutral;
 
         components.push_back(rightVar1);
         components.push_back(rightVar2);

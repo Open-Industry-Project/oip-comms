@@ -11,13 +11,16 @@ A pusher can be link to a simulator tag, for instance boxdetection.
 A infrared sensor can be link to the same simulator tag with the same name.
 … et voila when a box is close to the sensor the pusher enter in action.
 
-Arithmetic (+ - * / %) and logic (& | ^ !)  operations can be done but only with two members.
+Arithmetic (+ - * / %) and logic (& | ^ !)  operations can be done with several members.
+^ is xor not power.
+In complex operations, operator precedence is not fully guaranteed, use ( ).
 Members are either variables or constants.
-For instance the pusher can be link to the tag name detector=sensor1 | sensor2
+For instance the pusher can be link to the tag name detector=sensor1 | !sensor2
 
 Several equations can be written in a single line, separated by ; The used tag is the first one.
-    var = a + b_c ; b_c = b + c  // This is an allowed comment in the tag declaration
-    var = a & b_c ; b_c = b + !c  // ! is the only additional tolerated operator for the both members.
+    var = a + b_c ; b_c = b*c      // This is an allowed comment in the tag declaration	
+    var = a & b_c ; b_c = b | !c   // ! is the only additional tolerated operator for the members, but not before (.
+    but could be done with var = a & (b | !c)
 
 No loop can be directly done such as a=b+d then b=c-e and c=a*f. A tag in such loop is immediatly desactivated.
 If a loop is required, uses the function prev(var) somewhere. Here for instance c=prev(a)*f. 
@@ -91,8 +94,7 @@ Retentive timerOn can be build with
 	    or output=ton(rs(input_set,input_reset),delay)
 Building an auto-reset counter
 	    V=count(input,_reset); _reset=GE(prev(V),7);
-	    or V=count(input,__reset=GE(prev(V),7))
-   
+	    or V=count(input,GE(prev(V),7))
    
 A very basic text base protocol on udp port 55555 with the last (unique expected) client is integrated.
 JSON RPC only with notifications (no request/response)
