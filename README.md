@@ -9,7 +9,7 @@ Tracked as a git submodule under `ads/` and compiled from source with the rest o
 - https://github.com/Beckhoff/ADS
 
 The Beckhoff ADS library has two variants and the build picks one per platform:
-- **Windows**: links against the locally-installed `TcAdsDll.dll` (Beckhoff's official client) via the `USE_TWINCAT_ROUTER` define. Required because TwinCAT 3 build 4026 enforces Secure ADS, and the standalone library only speaks plain TCP — its requests are silently dropped by 4026's runtime. Requires TwinCAT to be installed locally; `TcAdsDll.dll` is bundled alongside the GDExtension at distribution time so end-users without a TwinCAT install on PATH still load it.
+- **Windows**: links against the locally-installed `TcAdsDll.dll` (Beckhoff's official client) via the `USE_TWINCAT_ROUTER` define. Required because TwinCAT 3 build 4026 enforces Secure ADS, and the standalone library only speaks plain TCP — its requests are silently dropped by 4026's runtime. Requires TwinCAT to be installed locally; the GDExtension delay-loads `TcAdsDll.dll` at runtime, resolving the install path from the Windows registry (see [src/tcads_loader.cpp](src/tcads_loader.cpp)). The DLL itself is **not** redistributed with this project.
 - **Linux / macOS**: uses the standalone library (its own AmsRouter, plain TCP). This is the standalone lib's documented use case — connecting from a non-TwinCAT host to a remote TwinCAT system. A route entry must be configured on the remote TwinCAT for the local AmsNetId.
 
 See PR on Open Industry Project [https://github.com/open62541/open62541](https://github.com/Open-Industry-Project/Open-Industry-Project/pull/161)
@@ -62,6 +62,8 @@ Inside the `.vs/` folder you can create `launch.vs.json`:
 
 Then you can launch the OIP editor from Visual Studio and drop in breakpoints to test.
 
-# Licensing
-Right now technically there is no license and use is only as a part of the Open Industry Project.
-I haven't gone through licensing requirements yet, but please review licensing requirements of the Godot Engine, the Open Industry Project, libplctag and open62541. It's going to be the common denominator of those licenses.
+## License
+
+This project is licensed under the [MIT License](LICENSE.md).
+
+For the licenses of bundled and linked third-party libraries (godot-cpp, Beckhoff ADS, libplctag, open62541, TcAdsDll), see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
