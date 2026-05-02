@@ -96,6 +96,7 @@ Building an auto-reset counter
 	    V=count(input,_reset); _reset=GE(prev(V),7);
 	    or V=count(input,GE(prev(V),7))
    
+
 A very basic text base protocol on udp port 55555 with the last (unique expected) client is integrated.
 JSON RPC only with notifications (no request/response)
       -receive by the server
@@ -120,3 +121,29 @@ For instance for put it just check the pattern "put" then it just find the secon
 So sending just "subscribe" or "unsubscribe" is OK and sending {"put" {"v1":value1,"v2":value2  is also OK 
 but don't miss the two '{' and the quotes enclosing the method name.
 So malformed messages are welcome, some working, some not. Real JSON-RPC messages are strongly recommended !
+
+
+... And a simple python client code :
+
+import json
+import socket
+import sys
+
+UDPClientSocket = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+
+UDPClientSocket.sendto(str.encode('{"jsonrpc": "2.0", "method": "subscribe"}'),  ("127.0.0.1", 55555))
+
+UDPClientSocket.settimeout(1.0)
+
+while True:
+	try:
+		data, addr = UDPClientSocket.recvfrom(1500)
+		notify=json.loads(data.decode())
+		params=notify["params"]
+		print("")
+		for value in params:
+    			print(value," ",params[value])
+	except:
+		sys.stdout.write ('.')
+		sys.stdout.flush()
+
