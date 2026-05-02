@@ -129,9 +129,16 @@ import json
 import socket
 import sys
 
+OIP=("127.0.0.1", 55555)
+
 UDPClientSocket = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
 
-UDPClientSocket.sendto(str.encode('{"jsonrpc": "2.0", "method": "subscribe"}'),  ("127.0.0.1", 55555))
+UDPClientSocket.sendto(str.encode('{"jsonrpc": "2.0", "method": "subscribe"}'), OIP)
+
+# Write sample, nothing done if helloOIP does not exist
+SendValue={"jsonrpc": "2.0", "method": "put", "params":{}}
+SendValue["params"]["helloOIP"]=1
+UDPClientSocket.sendto(str.encode(json.dumps(SendValue)), OIP)
 
 UDPClientSocket.settimeout(1.0)
 
@@ -146,4 +153,3 @@ while True:
 	except:
 		sys.stdout.write ('.')
 		sys.stdout.flush()
-

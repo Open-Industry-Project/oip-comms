@@ -1010,7 +1010,7 @@ private:
                     uint8_t bufrecp[1500];
                     sockaddr_in from{};
                     socklen_t fromLen = (socklen_t)sizeof(from);
-                    int n;
+                    int n=0;
                     
                     if (clientudpAddr.sin_family == 0xFFFF) // no subscribed client : receive in blocking mode
                       n = udp_recvfrom(udpSock, bufrecp, sizeof(bufrecp)-1, (sockaddr*)&from, &fromLen);
@@ -1209,6 +1209,9 @@ private:
             {
                 return;
             }
+
+            std::transform(name.begin(), name.end(), name.begin(),
+                [](unsigned char c) { return std::tolower(c); });
 
             int Idx = SimTag::findTag(name);
             if (Idx!=-1)
