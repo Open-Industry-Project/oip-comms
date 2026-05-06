@@ -1,16 +1,36 @@
 # Open Industry Project - GDextension Component
-This component is for the Open Industry Project (OIP). It enables communications with the following libraries:
+This component is for the Open Industry Project (OIP). It exposes a single `OIPComms` singleton that drives multiple industrial-comms protocols through one unified read/write/poll API. Each tag group is registered with a `protocol` string that selects the backend.
 
-Prebuilt and dropped into `lib/` (built from source from these commits):
+| `protocol` | Backend | Source |
+|------------|---------|--------|
+| `ab_eip`, `modbus_tcp` | [libplctag](https://github.com/libplctag/libplctag) | prebuilt in `lib/` |
+| `opc_ua` | [open62541](https://github.com/open62541/open62541) | prebuilt in `lib/` |
+| `s7` | Siemens S7 PUT/GET | vendored in [src/S7Com.cpp](src/S7Com.cpp) |
+| `ads` | [Beckhoff/ADS](https://github.com/Beckhoff/ADS) | git submodule under `ads/` |
+| `rtde` | Universal Robots Real-Time Data Exchange (v2) | hand-rolled in [src/rtde_client.cpp](src/rtde_client.cpp), no external dep |
+
+Prebuilt-library commits (built from source, dropped into `lib/`):
 - https://github.com/libplctag/libplctag/commit/c55bc5876d938dda1c609750cde5ae4812d7b8a8
 - https://github.com/open62541/open62541/commit/de932080cf1264748b5b757dd7e87e422c4df0aa
-
-Tracked as a git submodule under `ads/` and compiled from source with the rest of the project:
-- https://github.com/Beckhoff/ADS
 
 The Beckhoff ADS library has two variants and the build picks one per platform:
 - **Windows**: links against the locally-installed `TcAdsDll.dll` (Beckhoff's official client) via the `USE_TWINCAT_ROUTER` define. Required because TwinCAT 3 build 4026 enforces Secure ADS, and the standalone library only speaks plain TCP — its requests are silently dropped by 4026's runtime. Requires TwinCAT to be installed locally; the GDExtension delay-loads `TcAdsDll.dll` at runtime, resolving the install path from the Windows registry (see [src/tcads_loader.cpp](src/tcads_loader.cpp)). The DLL itself is **not** redistributed with this project.
 - **Linux / macOS**: uses the standalone library (its own AmsRouter, plain TCP). This is the standalone lib's documented use case — connecting from a non-TwinCAT host to a remote TwinCAT system. A route entry must be configured on the remote TwinCAT for the local AmsNetId.
+
+## RTDE specifics
+The RTDE backend talks to Universal Robots controllers (real hardware or URSim) on TCP port 30004 using protocol version 2. The full variable vocabulary is documented in the [official UR RTDE guide](https://docs.universal-robots.com/tutorials/communication-protocol-tutorials/rtde-guide.html). Tag-group fields:
+- **Gateway**: robot IP address (e.g. `192.168.56.101`).
+- **Path / CPU**: unused.
+- **Polling rate (ms)**: mapped to the controller's stream frequency (`Hz = 1000 / polling_ms`), clamped to [1, 500] Hz.
+
+Tag names follow UR's RTDE variable vocabulary. Vector fields are read element-by-element using `name[index]` syntax. A few examples:
+- `actual_q[0]` … `actual_q[5]` — joint angles, one tag per joint (read with `read_float64`).
+- `actual_TCP_pose[0]` … `actual_TCP_pose[5]` — TCP pose components.
+- `runtime_state` — controller program state (read with `read_uint32`).
+- `input_int_register_0` — writable INT32 register (write with `write_int32`).
+- `input_double_register_0` — writable DOUBLE register (write with `write_float64`).
+
+Tag names that begin with `input_` are routed to the input recipe automatically and are writable from this side; everything else lives in the output recipe and is read-only.
 
 See PR on Open Industry Project [https://github.com/open62541/open62541](https://github.com/Open-Industry-Project/Open-Industry-Project/pull/161)
 

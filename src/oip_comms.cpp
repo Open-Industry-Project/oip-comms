@@ -11,6 +11,8 @@
 #include "AdsDevice.h"
 #include "AdsException.h"
 #include "tcads_loader.h"
+#include "rtde_client.h"
+#include <cstring>
 #include <memory>
 #include <optional>
 
@@ -26,6 +28,75 @@ struct AdsTagGroupImpl {
 	std::unique_ptr<AdsDevice> client;
 	std::map<godot::String, AdsTagEntry> tags;
 };
+
+struct RtdeTagEntry {
+	bool initialized = false;
+	std::string base_name;
+	int element_index = 0;
+	bool has_brackets = false;
+	bool is_input = false;
+	bool is_bit_indexed = false;
+	oip_rtde::FieldType base_type = oip_rtde::FIELD_UNKNOWN;
+	oip_rtde::FieldType scalar_type = oip_rtde::FIELD_UNKNOWN;
+	size_t byte_offset = 0;
+};
+
+struct RtdeTagGroupImpl {
+	std::unique_ptr<oip_rtde::Client> client;
+	std::map<godot::String, RtdeTagEntry> tags;
+
+	bool started = false;
+
+	uint8_t output_recipe_id = 0;
+	std::vector<uint8_t> output_payload;
+	bool have_output_data = false;
+
+	bool input_recipe_setup = false;
+	uint8_t input_recipe_id = 0;
+	std::vector<uint8_t> input_payload;
+};
+
+static bool parse_tag_index(const godot::String &raw, std::string &out_base, int &out_index, bool &out_has_brackets) {
+	using namespace godot;
+	int lb = raw.find("[");
+	if (lb < 0) {
+		CharString u = raw.utf8();
+		out_base.assign(u.get_data(), u.length());
+		out_index = 0;
+		out_has_brackets = false;
+		return true;
+	}
+	int rb = raw.find("]", lb + 1);
+	if (rb < 0 || rb != raw.length() - 1) return false;
+	String base = raw.substr(0, lb);
+	String idx_str = raw.substr(lb + 1, rb - lb - 1);
+	if (idx_str.is_empty() || !idx_str.is_valid_int()) return false;
+	CharString u = base.utf8();
+	out_base.assign(u.get_data(), u.length());
+	out_index = (int)idx_str.to_int();
+	out_has_brackets = true;
+	return true;
+}
+
+static bool rtde_is_input_name(const std::string &base) {
+	return base.rfind("input_", 0) == 0;
+}
+
+static uint32_t be32_to_host(const uint8_t *p) {
+	return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) |
+			(uint32_t(p[2]) << 8) | uint32_t(p[3]);
+}
+static uint64_t be64_to_host(const uint8_t *p) {
+	return ((uint64_t)be32_to_host(p) << 32) | (uint64_t)be32_to_host(p + 4);
+}
+static void host_to_be32(uint32_t v, uint8_t *p) {
+	p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+	p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+}
+static void host_to_be64(uint64_t v, uint8_t *p) {
+	host_to_be32((uint32_t)(v >> 32), p);
+	host_to_be32((uint32_t)v, p + 4);
+}
 
 static godot::String ads_err_name(long err) {
 	switch ((uint32_t)err) {
@@ -113,6 +184,11 @@ void OIPComms::cleanup_tag_group(const String &tag_group_name) {
 		}
 		tag_group.opc_ua_tags.clear();
 
+	} else if (tag_group.protocol == "rtde") {
+		if (tag_group.rtde_impl != nullptr) {
+			delete tag_group.rtde_impl;
+			tag_group.rtde_impl = nullptr;
+		}
 	} else if (tag_group.protocol == "ads") {
 		if (tag_group.ads_impl != nullptr) {
 			delete tag_group.ads_impl;
@@ -284,11 +360,97 @@ OIP_ADS_SET(int8, int8_t, INT)
 OIP_ADS_SET(float64, double, FLOAT)
 OIP_ADS_SET(float32, float, FLOAT)
 
+void OIPComms::rtde_tag_set(const String &tag_group_name, const String &tag_path,
+		const godot::Variant value) {
+	if (!rtde_session_started(tag_group_name)) return;
+	TagGroup &tag_group = tag_groups[tag_group_name];
+	RtdeTagGroupImpl &impl = *tag_group.rtde_impl;
+	if (!impl.input_recipe_setup) {
+		print("RTDE: write to " + tag_path + " ignored — no input recipe configured", true);
+		return;
+	}
+	auto it = impl.tags.find(tag_path);
+	if (it == impl.tags.end()) return;
+	RtdeTagEntry &tag = it->second;
+	if (!tag.is_input) {
+		print("RTDE: tag " + tag_path + " is read-only (output recipe)", true);
+		return;
+	}
+	if (!tag.initialized) return;
+
+	if (tag.is_bit_indexed) {
+		const size_t int_size = oip_rtde::field_scalar_size(tag.base_type);
+		if (tag.byte_offset + int_size > impl.input_payload.size()) return;
+		uint8_t *p = impl.input_payload.data() + tag.byte_offset;
+		const bool b = (bool)value;
+		const int bit = tag.element_index;
+		if (tag.base_type == oip_rtde::FIELD_UINT8) {
+			if (b) p[0] |= (uint8_t)(1u << bit);
+			else p[0] &= (uint8_t)~(1u << bit);
+		} else if (tag.base_type == oip_rtde::FIELD_UINT32) {
+			uint32_t cur = be32_to_host(p);
+			if (b) cur |= (1u << bit);
+			else cur &= ~(1u << bit);
+			host_to_be32(cur, p);
+		} else if (tag.base_type == oip_rtde::FIELD_UINT64) {
+			uint64_t cur = be64_to_host(p);
+			if (b) cur |= ((uint64_t)1 << bit);
+			else cur &= ~((uint64_t)1 << bit);
+			host_to_be64(cur, p);
+		}
+		if (!impl.client->send_input(impl.input_recipe_id,
+					impl.input_payload.data(), impl.input_payload.size())) {
+			print(String(impl.client->last_error().c_str()), true);
+		}
+		return;
+	}
+
+	const size_t scalar_size = oip_rtde::field_scalar_size(tag.scalar_type);
+	if (tag.byte_offset + scalar_size > impl.input_payload.size()) return;
+
+	uint8_t *dst = impl.input_payload.data() + tag.byte_offset;
+	switch (tag.scalar_type) {
+		case oip_rtde::FIELD_BOOL:
+			dst[0] = ((bool)value) ? 1 : 0;
+			break;
+		case oip_rtde::FIELD_UINT8:
+			dst[0] = (uint8_t)(int64_t)value;
+			break;
+		case oip_rtde::FIELD_INT32: {
+			int32_t v = (int32_t)(int64_t)value;
+			host_to_be32((uint32_t)v, dst);
+			break;
+		}
+		case oip_rtde::FIELD_UINT32:
+			host_to_be32((uint32_t)(int64_t)value, dst);
+			break;
+		case oip_rtde::FIELD_UINT64:
+			host_to_be64((uint64_t)(int64_t)value, dst);
+			break;
+		case oip_rtde::FIELD_DOUBLE: {
+			double d = (double)value;
+			uint64_t bits;
+			std::memcpy(&bits, &d, 8);
+			host_to_be64(bits, dst);
+			break;
+		}
+		default:
+			print("RTDE: unsupported write type for " + tag_path, true);
+			return;
+	}
+	if (!impl.client->send_input(impl.input_recipe_id,
+				impl.input_payload.data(), impl.input_payload.size())) {
+		print(String(impl.client->last_error().c_str()), true);
+	}
+}
+
 #define OIP_SET_CALL(a)                                                             \
 if (tag_group.protocol == "opc_ua") {                                               \
 	opc_tag_set_##a(write_req.tag_group_name, write_req.tag_name, write_req.value); \
 } else if (tag_group.protocol == "ads") {                                           \
 	ads_tag_set_##a(write_req.tag_group_name, write_req.tag_name, write_req.value); \
+} else if (tag_group.protocol == "rtde") {                                          \
+	rtde_tag_set(write_req.tag_group_name, write_req.tag_name, write_req.value);    \
 } else if (tag_group.protocol == "s7") {                                            \
 		if (tag_pointer >= 0) S7_tag_set_##a(tag_pointer, write_req.value);         \
 }                                                                                   \
@@ -300,7 +462,8 @@ void OIPComms::process_write(const WriteRequest &write_req) {
 	TagGroup &tag_group = tag_groups[write_req.tag_group_name];
 
 	int32_t tag_pointer = -1;
-	if (tag_group.protocol != "opc_ua" && tag_group.protocol != "ads") {
+	if (tag_group.protocol != "opc_ua" && tag_group.protocol != "ads"
+			&& tag_group.protocol != "rtde") {
 		PlcTag &tag = tag_group.plc_tags[write_req.tag_name];
 		tag_pointer = tag.tag_pointer;
 	}
@@ -342,8 +505,9 @@ void OIPComms::process_write(const WriteRequest &write_req) {
 	}
 
 	// libplctag and S7 cache the value above; this issues the actual network write.
-	// opc_ua and ads write inline in their per-type set helpers.
-	if (tag_group.protocol != "opc_ua" && tag_group.protocol != "ads") {
+	// opc_ua, ads, and rtde write inline in their per-type set helpers.
+	if (tag_group.protocol != "opc_ua" && tag_group.protocol != "ads"
+			&& tag_group.protocol != "rtde") {
 		if (tag_group.protocol == "s7"){
 			if (tag_pointer >= 0 && S7_tag_write(tag_pointer) == PLCTAG_STATUS_OK) {
 				tag_groups[write_req.tag_group_name].plc_tags[write_req.tag_name].dirty = true;
@@ -372,6 +536,8 @@ void OIPComms::process_tag_group(const String &tag_group_name) {
 		process_opc_ua_tag_group(tag_group_name);
 	} else if (tag_group.protocol == "ads") {
 		process_ads_tag_group(tag_group_name);
+	} else if (tag_group.protocol == "rtde") {
+		process_rtde_tag_group(tag_group_name);
 	} else {
 		process_plc_tag_group(tag_group_name);
 	}
@@ -701,6 +867,186 @@ void OIPComms::process_ads_tag_group(const String &tag_group_name) {
 	}
 }
 
+bool OIPComms::rtde_session_started(const String &tag_group_name) {
+	TagGroup &tag_group = tag_groups[tag_group_name];
+	return tag_group.rtde_impl != nullptr
+			&& tag_group.rtde_impl->client != nullptr
+			&& tag_group.rtde_impl->client->is_open()
+			&& tag_group.rtde_impl->started;
+}
+
+bool OIPComms::init_rtde_session(const String &tag_group_name) {
+	TagGroup &tag_group = tag_groups[tag_group_name];
+	if (tag_group.rtde_impl == nullptr)
+		tag_group.rtde_impl = new RtdeTagGroupImpl();
+	RtdeTagGroupImpl &impl = *tag_group.rtde_impl;
+
+	impl.client.reset(new oip_rtde::Client());
+	impl.started = false;
+	impl.have_output_data = false;
+	impl.input_recipe_setup = false;
+	impl.output_payload.clear();
+	impl.input_payload.clear();
+	for (auto &x : impl.tags) {
+		x.second.initialized = false;
+		x.second.byte_offset = 0;
+	}
+
+	std::vector<std::string> output_names;
+	std::vector<std::string> input_names;
+	for (auto &x : impl.tags) {
+		const std::string &base = x.second.base_name;
+		std::vector<std::string> &bucket = x.second.is_input ? input_names : output_names;
+		bool dup = false;
+		for (const auto &n : bucket) {
+			if (n == base) { dup = true; break; }
+		}
+		if (!dup) bucket.push_back(base);
+	}
+
+	if (output_names.empty()) {
+		print("RTDE: no output variables registered for group " + tag_group_name, true);
+		return false;
+	}
+
+	const String host = tag_group.gateway;
+	CharString host_utf8 = host.utf8();
+	if (!impl.client->open(std::string(host_utf8.get_data(), host_utf8.length()))) {
+		print(String(impl.client->last_error().c_str()), true);
+		return false;
+	}
+	if (!impl.client->negotiate_version()) {
+		print(String(impl.client->last_error().c_str()), true);
+		impl.client->close();
+		return false;
+	}
+
+	// polling_interval (ms) → RTDE stream frequency (Hz), capped to UR's range.
+	double frequency = 125.0;
+	if (tag_group.polling_interval > 0)
+		frequency = 1000.0 / (double)tag_group.polling_interval;
+	if (frequency > 500.0) frequency = 500.0;
+	if (frequency < 1.0) frequency = 1.0;
+
+	std::vector<oip_rtde::FieldType> output_types;
+	if (!impl.client->setup_outputs(frequency, output_names, output_types, impl.output_recipe_id)) {
+		print(String(impl.client->last_error().c_str()), true);
+		impl.client->close();
+		return false;
+	}
+
+	std::map<std::string, std::pair<size_t, oip_rtde::FieldType>> output_offsets;
+	{
+		size_t off = 0;
+		for (size_t i = 0; i < output_names.size(); ++i) {
+			output_offsets[output_names[i]] = {off, output_types[i]};
+			off += oip_rtde::field_size(output_types[i]);
+		}
+		impl.output_payload.assign(off, 0);
+	}
+
+	std::map<std::string, std::pair<size_t, oip_rtde::FieldType>> input_offsets;
+	if (!input_names.empty()) {
+		std::vector<oip_rtde::FieldType> input_types;
+		if (!impl.client->setup_inputs(input_names, input_types, impl.input_recipe_id)) {
+			print(String(impl.client->last_error().c_str()), true);
+			impl.client->close();
+			return false;
+		}
+		size_t off = 0;
+		for (size_t i = 0; i < input_names.size(); ++i) {
+			input_offsets[input_names[i]] = {off, input_types[i]};
+			off += oip_rtde::field_size(input_types[i]);
+		}
+		impl.input_payload.assign(off, 0);
+		impl.input_recipe_setup = true;
+	}
+
+	for (auto &x : impl.tags) {
+		RtdeTagEntry &entry = x.second;
+		const auto &table = entry.is_input ? input_offsets : output_offsets;
+		auto it = table.find(entry.base_name);
+		if (it == table.end()) {
+			print("RTDE: tag " + x.first + " has no recipe entry (internal error)", true);
+			impl.client->close();
+			return false;
+		}
+		entry.base_type = it->second.second;
+		const bool unsigned_int_scalar =
+				entry.base_type == oip_rtde::FIELD_UINT8 ||
+				entry.base_type == oip_rtde::FIELD_UINT32 ||
+				entry.base_type == oip_rtde::FIELD_UINT64;
+		if (entry.has_brackets && unsigned_int_scalar) {
+			entry.is_bit_indexed = true;
+			entry.scalar_type = oip_rtde::FIELD_BOOL;
+			const int bits = (int)(oip_rtde::field_scalar_size(entry.base_type) * 8);
+			if (entry.element_index < 0 || entry.element_index >= bits) {
+				print("RTDE: bit index " + itos((int64_t)entry.element_index) + " out of range for "
+						+ String(entry.base_name.c_str()) + " ("
+						+ String(oip_rtde::field_type_name(entry.base_type)) + " has "
+						+ itos((int64_t)bits) + " bits)", true);
+				impl.client->close();
+				return false;
+			}
+			entry.byte_offset = it->second.first;
+		} else {
+			entry.scalar_type = oip_rtde::field_element_type(entry.base_type);
+			const int arity = oip_rtde::field_arity(entry.base_type);
+			if (entry.element_index < 0 || entry.element_index >= arity) {
+				print("RTDE: index " + itos((int64_t)entry.element_index) + " out of range for "
+						+ String(entry.base_name.c_str()) + " ("
+						+ String(oip_rtde::field_type_name(entry.base_type)) + ")", true);
+				impl.client->close();
+				return false;
+			}
+			entry.byte_offset = it->second.first
+					+ (size_t)entry.element_index * oip_rtde::field_scalar_size(entry.base_type);
+		}
+	}
+
+	if (!impl.client->start()) {
+		print(String(impl.client->last_error().c_str()), true);
+		impl.client->close();
+		return false;
+	}
+
+	for (auto &x : impl.tags) {
+		x.second.initialized = true;
+		tag_group.init_count++;
+	}
+
+	impl.started = true;
+	print("RTDE session started for " + tag_group_name + " at " + String::num(frequency) + " Hz");
+	return true;
+}
+
+void OIPComms::process_rtde_tag_group(const String &tag_group_name) {
+	TagGroup &tag_group = tag_groups[tag_group_name];
+	if (!rtde_session_started(tag_group_name)) {
+		if (!init_rtde_session(tag_group_name)) {
+			tag_group.has_error = true;
+			return;
+		}
+	}
+
+	RtdeTagGroupImpl &impl = *tag_group.rtde_impl;
+
+	uint8_t recipe_id = 0;
+	std::vector<uint8_t> payload;
+	int r = impl.client->poll(recipe_id, payload);
+	if (r < 0) {
+		print(String(impl.client->last_error().c_str()), true);
+		impl.started = false;
+		tag_group.has_error = true;
+		return;
+	}
+	if (r == 1 && recipe_id == impl.output_recipe_id
+			&& payload.size() == impl.output_payload.size()) {
+		std::memcpy(impl.output_payload.data(), payload.data(), payload.size());
+		impl.have_output_data = true;
+	}
+}
+
 bool OIPComms::tag_group_exists(const String& tag_group_name) {
 	return tag_groups.find(tag_group_name) != tag_groups.end();
 }
@@ -713,6 +1059,9 @@ bool OIPComms::tag_exists(const String& tag_group_name, const String& tag_name) 
 		} else if (tag_group.protocol == "ads") {
 			if (tag_group.ads_impl == nullptr) return false;
 			return tag_group.ads_impl->tags.find(tag_name) != tag_group.ads_impl->tags.end();
+		} else if (tag_group.protocol == "rtde") {
+			if (tag_group.rtde_impl == nullptr) return false;
+			return tag_group.rtde_impl->tags.find(tag_name) != tag_group.rtde_impl->tags.end();
 		} else {
 			return tag_group.plc_tags.find(tag_name) != tag_group.plc_tags.end();
 		}
@@ -756,6 +1105,8 @@ void OIPComms::process() {
 					total_tag_count = tag_group.opc_ua_tags.size();
 				else if (tag_group.protocol == "ads")
 					total_tag_count = tag_group.ads_impl ? tag_group.ads_impl->tags.size() : 0;
+				else if (tag_group.protocol == "rtde")
+					total_tag_count = tag_group.rtde_impl ? tag_group.rtde_impl->tags.size() : 0;
 				else
 					total_tag_count = tag_group.plc_tags.size();
 
@@ -881,6 +1232,7 @@ void OIPComms::register_tag_group(const String p_tag_group_name, const int p_pol
 		nullptr,
 		std::map<String, OpcUaTag>(),
 
+		nullptr,
 		nullptr
 	};
 
@@ -905,6 +1257,22 @@ bool OIPComms::register_tag(const String p_tag_group_name, const String p_tag_na
 				if (tag_group.ads_impl == nullptr)
 					tag_group.ads_impl = new AdsTagGroupImpl();
 				tag_group.ads_impl->tags[p_tag_name];
+			} else if (tag_group.protocol == "rtde") {
+				if (tag_group.rtde_impl == nullptr)
+					tag_group.rtde_impl = new RtdeTagGroupImpl();
+				std::string base;
+				int idx = 0;
+				bool has_brackets = false;
+				if (!parse_tag_index(p_tag_name, base, idx, has_brackets)) {
+					print("RTDE: malformed tag name '" + p_tag_name + "' (expected name or name[index])", true);
+					return false;
+				}
+				RtdeTagEntry entry;
+				entry.base_name = base;
+				entry.element_index = idx;
+				entry.has_brackets = has_brackets;
+				entry.is_input = rtde_is_input_name(base);
+				tag_group.rtde_impl->tags[p_tag_name] = entry;
 			} else {
 				PlcTag tag = { false, -1, p_elem_count, false };
 				tag_group.plc_tags[p_tag_name] = tag;
@@ -1218,6 +1586,44 @@ Dictionary OIPComms::browse_node_info(const String p_node_id) {
 					return *reinterpret_cast<const b *>(tag.value.data());         \
 				}                                                                  \
 				return 0.0;                                                        \
+			} else if (tag_group.protocol == "rtde") {                             \
+				if (tag_group.rtde_impl == nullptr) return 0.0;                    \
+				auto rit = tag_group.rtde_impl->tags.find(p_tag_name);             \
+				if (rit == tag_group.rtde_impl->tags.end()) return 0.0;            \
+				RtdeTagEntry &rtag = rit->second;                                  \
+				if (!rtag.initialized) return 0.0;                                 \
+				const std::vector<uint8_t> &src = rtag.is_input                    \
+						? tag_group.rtde_impl->input_payload                       \
+						: tag_group.rtde_impl->output_payload;                     \
+				if (!rtag.is_input && !tag_group.rtde_impl->have_output_data)      \
+					return 0.0;                                                    \
+				if (rtag.is_bit_indexed) {                                         \
+					const size_t int_size = oip_rtde::field_scalar_size(rtag.base_type); \
+					if (rtag.byte_offset + int_size > src.size()) return 0.0;      \
+					const uint8_t *bp = src.data() + rtag.byte_offset;             \
+					uint64_t v = 0;                                                \
+					if (rtag.base_type == oip_rtde::FIELD_UINT8) v = bp[0];        \
+					else if (rtag.base_type == oip_rtde::FIELD_UINT32) v = be32_to_host(bp); \
+					else if (rtag.base_type == oip_rtde::FIELD_UINT64) v = be64_to_host(bp); \
+					return (b)((v >> rtag.element_index) & 1u);                    \
+				}                                                                  \
+				if (rtag.byte_offset + oip_rtde::field_scalar_size(rtag.scalar_type) > src.size()) \
+					return 0.0;                                                    \
+				const uint8_t *p = src.data() + rtag.byte_offset;                  \
+				switch (rtag.scalar_type) {                                        \
+					case oip_rtde::FIELD_BOOL: return (b)(p[0] != 0);              \
+					case oip_rtde::FIELD_UINT8: return (b)p[0];                    \
+					case oip_rtde::FIELD_INT32: return (b)(int32_t)be32_to_host(p);\
+					case oip_rtde::FIELD_UINT32: return (b)be32_to_host(p);        \
+					case oip_rtde::FIELD_UINT64: return (b)be64_to_host(p);        \
+					case oip_rtde::FIELD_DOUBLE: {                                 \
+						uint64_t bits = be64_to_host(p);                           \
+						double d;                                                  \
+						std::memcpy(&d, &bits, 8);                                 \
+						return (b)d;                                               \
+					}                                                              \
+					default: return 0.0;                                           \
+				}                                                                  \
 			} else if (tag_group.protocol == "s7") {                              \
 				PlcTag tag = tag_group.plc_tags[p_tag_name];                      \
 				if (tag.initialized) {                                            \

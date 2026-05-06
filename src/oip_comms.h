@@ -15,6 +15,7 @@
 #include "oip_blocking_queue.h"
 
 struct AdsTagGroupImpl;
+struct RtdeTagGroupImpl;
 
 namespace godot {
 
@@ -77,6 +78,8 @@ private:
 
 		// Defined in oip_comms.cpp; AdsLib pulls winsock2.h, which can't reach this header.
 		AdsTagGroupImpl *ads_impl;
+
+		RtdeTagGroupImpl *rtde_impl;
 	};
 	std::map<String, TagGroup> tag_groups;
 	std::vector<String> tag_group_order;
@@ -115,6 +118,7 @@ private:
 	void process_plc_tag_group(const String &tag_group_name);
 	void process_opc_ua_tag_group(const String &tag_group_name);
 	void process_ads_tag_group(const String &tag_group_name);
+	void process_rtde_tag_group(const String &tag_group_name);
 
 	bool init_plc_tag(const String &tag_group_name, const String &tag_name);
 
@@ -124,8 +128,11 @@ private:
 	bool init_ads_device(const String &tag_group_name);
 	bool init_ads_tag(const String &tag_group_name, const String &tag_name);
 
+	bool init_rtde_session(const String &tag_group_name);
+
 	bool opc_ua_client_connected(const String &tag_group_name);
 	bool ads_device_connected(const String &tag_group_name);
+	bool rtde_session_started(const String &tag_group_name);
 	bool tag_group_exists(const String &tag_group_name);
 	bool tag_exists(const String &tag_group_name, const String &tag_name);
 
@@ -168,6 +175,8 @@ private:
 	OIP_DECLARE_ADS_SET(int8)
 	OIP_DECLARE_ADS_SET(float64)
 	OIP_DECLARE_ADS_SET(float32)
+
+	void rtde_tag_set(const String &tag_group_name, const String &tag_path, const godot::Variant value);
 
 	void cleanup_tag_groups();
 	void cleanup_tag_group(const String &tag_group_name);
