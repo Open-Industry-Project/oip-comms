@@ -200,6 +200,12 @@ void OIPComms::cleanup_tag_group(const String &tag_group_name) {
 			S7_tag_destroy(tag.tag_pointer);
 		}
 		tag_group.plc_tags.clear();
+	} else if (tag_group.protocol == "simulator") {
+		for (auto &x : tag_group.plc_tags) {
+			PlcTag &tag = x.second;
+			Simulator_tag_destroy(tag.tag_pointer);
+		}
+		tag_group.plc_tags.clear();
 	} else {
 		for (auto &x : tag_group.plc_tags) {
 			PlcTag &tag = x.second;
@@ -453,8 +459,10 @@ if (tag_group.protocol == "opc_ua") {                                           
 	rtde_tag_set(write_req.tag_group_name, write_req.tag_name, write_req.value);    \
 } else if (tag_group.protocol == "s7") {                                            \
 		if (tag_pointer >= 0) S7_tag_set_##a(tag_pointer, write_req.value);         \
-}                                                                                   \
-else {                                                                              \
+} else if (tag_group.protocol == "simulator") {                                     \
+		if (tag_pointer >= 0)                                                       \
+			Simulator_tag_set_##a(tag_pointer, write_req.value);                    \
+} else {                                                                            \
 	if (tag_pointer >= 0) plc_tag_set_##a(tag_pointer, 0, write_req.value);         \
 }
 
@@ -514,7 +522,14 @@ void OIPComms::process_write(const WriteRequest &write_req) {
 				print("Write tag done: " + write_req.tag_name);
 			} else {
 				print("Failed to write tag: " + write_req.tag_name, true);
+			}
+		}
+		if (tag_group.protocol == "simulator") {
+			if (tag_pointer >= 0 && Simulator_tag_write(tag_pointer) == PLCTAG_STATUS_OK) {
+				tag_groups[write_req.tag_group_name].plc_tags[write_req.tag_name].dirty = true;
 				print("Write tag done: " + write_req.tag_name);
+			} else {
+				print("Failed to write tag: " + write_req.tag_name, true);
 			}
 		}
 		else {
@@ -556,21 +571,26 @@ void OIPComms::process_plc_tag_group(const String &tag_group_name) {
 				return;
 			}
 		}
-		if (tag_group.protocol == "s7")
-		{
+		if (tag_group.protocol == "s7") {
 			int read_result = S7_tag_read(tag.tag_pointer, timeout);
 			if (read_result == PLCTAG_STATUS_OK) {
 				tag.dirty = false;
 				tag.initialized = true;
-			}
-			else
-			{
+			} else {
 				tag_group.has_error = true;
 				return;
 			}
-
-		} else
-		if (tag.tag_pointer >= 0) {
+		}
+		else if(tag_group.protocol == "simulator") {
+			int read_result = Simulator_tag_read(tag.tag_pointer);
+			if (read_result == PLCTAG_STATUS_OK) {
+				tag.dirty = false;
+				tag.initialized = true;
+			} else {
+				tag_group.has_error = true;
+				return;
+			}
+		} else if (tag.tag_pointer >= 0) {
 			if (!process_plc_read(tag, tag_name)) {
 				tag_group.has_error = true;
 				return;
@@ -584,12 +604,13 @@ void OIPComms::process_plc_tag_group(const String &tag_group_name) {
 bool OIPComms::init_plc_tag(const String &tag_group_name, const String &tag_name) {
 	TagGroup &tag_group = tag_groups[tag_group_name];
 	PlcTag &tag = tag_group.plc_tags[tag_name];
-
 	if (tag_group.protocol == "s7"){
-
 		tag.tag_pointer = S7_tag_create(tag_group.gateway.utf8().get_data(), tag_name.utf8().get_data());
-
-	} else {
+	}
+	else if (tag_group.protocol == "simulator") {
+		tag.tag_pointer = Simulator_tag_create(tag_name.utf8().get_data());
+	}
+	else {
 		String group_tag_path = "protocol=" + tag_group.protocol + "&gateway=" + tag_group.gateway + "&path=" + tag_group.path + "&cpu=" + tag_group.cpu + "&elem_count=";
 		String tag_path = group_tag_path + itos(tag.elem_count) + "&name=" + tag_name;
 		tag.tag_pointer = plc_tag_create(tag_path.utf8().get_data(), timeout);
@@ -1630,8 +1651,13 @@ Dictionary OIPComms::browse_node_info(const String p_node_id) {
 					int32_t tag_pointer = tag.tag_pointer;                        \
 					return S7_tag_get_##a(tag_pointer);                           \
 				} else { return 0.0; }                                            \
-			}                                                                     \
-			else {                                                                \
+			} else if (tag_group.protocol == "simulator") {                       \
+				PlcTag tag = tag_group.plc_tags[p_tag_name];                      \
+				if (tag.initialized) {                                            \
+					int32_t tag_pointer = tag.tag_pointer;                        \
+					return Simulator_tag_get_##a(tag_pointer);                    \
+				} else { return 0.0; }                                            \
+			} else {                                                              \
 				PlcTag tag = tag_group.plc_tags[p_tag_name];                      \
 				if (tag.initialized) {                                            \
 					int32_t tag_pointer = tag.tag_pointer;                        \

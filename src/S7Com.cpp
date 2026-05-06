@@ -47,6 +47,7 @@
 #include <thread>
 #include <chrono>
 #include <mutex>
+#include <algorithm>
 
 #include "S7Com.hpp"
 
