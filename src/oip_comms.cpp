@@ -341,11 +341,14 @@ void OIPComms::process_work() {
 
 		bool custom_instruction = false;
 		if (tag_group_name == "_CLEANUP_TAG_GROUPS") {
+			// Drain writes queued during the stop transition (e.g. parts
+			// publishing `running = false` from their `_on_simulation_ended`)
+			// BEFORE releasing tag handles so they actually reach the PLC.
+			flush_all_writes();
 			cleanup_tag_groups();
 			custom_instruction = true;
 		}
 
-		// at end of simulation, tag_group and write queues should be allow to flush out, but not actually do anything
 		flush_all_writes();
 
 		// only actually process if sim running
@@ -368,11 +371,16 @@ void OIPComms::queue_tag_group(const String &tag_group_name) {
 }
 
 void OIPComms::flush_all_writes() {
+	// Process every queued write. New writes can't be enqueued once sim_running
+	// flips false (write_##a is gated at the entry point), so anything sitting
+	// here was queued while sim was running and should reach the PLC even if
+	// we're now mid-stop. Without this, parts publishing final values from
+	// their `_on_simulation_ended` handlers (e.g. `running = false`) get
+	// silently dropped.
 	while (!write_queue.empty()) {
 		WriteRequest write_req = write_queue.front();
 		write_queue.pop();
-		if (sim_running)
-			process_write(write_req);
+		process_write(write_req);
 	}
 }
 
@@ -381,8 +389,7 @@ void OIPComms::flush_one_write() {
 	if (!write_queue.empty()) {
 		WriteRequest write_req = write_queue.front();
 		write_queue.pop();
-		if (sim_running)
-			process_write(write_req);
+		process_write(write_req);
 	}
 }
 
