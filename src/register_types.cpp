@@ -1,6 +1,7 @@
 #include "register_types.h"
 #include "oip_comms.h"
 #include "tcads_loader.h"
+#include "behavior_runtime.h" // _scaffold/ (on CPPPATH) — behavior-VM spike
 
 #include <gdextension_interface.h>
 #include <godot_cpp/core/class_db.hpp>
@@ -18,6 +19,7 @@ void initialize_gdextension_types(ModuleInitializationLevel p_level)
 		return;
 	}
 	GDREGISTER_CLASS(OIPComms);
+	GDREGISTER_CLASS(BehaviorRuntime);
 
 	_oip_comms = memnew(OIPComms);
 	Engine::get_singleton()->register_singleton("OIPComms", _oip_comms);

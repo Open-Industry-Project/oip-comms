@@ -39,7 +39,7 @@ env = SConscript("godot-cpp/SConstruct", {"env": env, "customs": customs})
 # and ADS's .cpp files must resolve to ads/AdsLib/Log.h. oip_comms.cpp still
 # finds MQTTClient.h here (no name collision). Paho's own .c files need the
 # reverse order, so they build with a cloned env (see paho_env below).
-env.Append(CPPPATH=["src/", "ads/AdsLib/", "paho/src/"])
+env.Append(CPPPATH=["src/", "src/_scaffold/", "ads/AdsLib/", "paho/src/", "thirdparty/quickjs/"])
 env.Append(LIBPATH=["lib/"])
 env.Append(LIBS=["plctag", "open62541"])
 env.Append(CPPDEFINES=[("CONFIG_DEFAULT_LOGLEVEL", "1")])
@@ -107,12 +107,31 @@ paho_objects = [
     if os.path.basename(str(node)) not in paho_sources_skip
 ]
 
+# QuickJS-ng (C11, uses <stdatomic.h>) backs the soft_plc transport's embedded ST engine. Built with
+# a cloned env so its C11 flags don't touch paho's C sources. src/soft_plc.cpp (the C++ wrapper) is
+# picked up by the Glob("src/*.cpp") below and finds quickjs.h via the CPPPATH added above.
+qjs_env = env.Clone()
+if env["platform"] == "windows":
+    qjs_env.Append(CFLAGS=["/MT", "/std:c11", "/experimental:c11atomics"])
+    qjs_env.Append(CPPDEFINES=["_CRT_SECURE_NO_WARNINGS"])
+quickjs_objects = [
+    qjs_env.SharedObject(s)
+    for s in [
+        "thirdparty/quickjs/quickjs.c",
+        "thirdparty/quickjs/libregexp.c",
+        "thirdparty/quickjs/libunicode.c",
+        "thirdparty/quickjs/dtoa.c",
+    ]
+]
+
 sources = (
     Glob("src/*.cpp")
+    + Glob("src/_scaffold/*.cpp")  # behavior-VM spike (behavior_engine + behavior_runtime)
     + Glob("ads/AdsLib/*.cpp")
     + Glob("ads/AdsLib/bhf/*.cpp")
     + Glob(ads_sources_dir + "/*.cpp")
     + paho_objects
+    + quickjs_objects
 )
 
 if env["target"] in ["editor", "template_debug"]:

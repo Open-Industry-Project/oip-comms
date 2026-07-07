@@ -18,6 +18,10 @@
 #include <mutex>
 #include <optional>
 
+#include <godot_cpp/classes/file_access.hpp>
+#include <godot_cpp/classes/json.hpp>
+#include "soft_plc.h"
+
 struct AdsTagEntry {
 	bool initialized = false;
 	std::optional<AdsHandle> handle;
@@ -74,6 +78,30 @@ struct MqttTagGroupImpl {
 	std::string client_id;
 	std::string username;
 	std::string password;
+};
+
+struct SoftPlcTagEntry {
+	godot::Variant value;
+	int data_type = 0;
+	bool is_input = false;    // set from the program meta on init (a part writes it, the PLC reads it)
+	bool is_output = false;   // a PLC output: the engine owns it, part writes are rejected (process_write)
+};
+
+struct SoftPlcTagGroupImpl {
+	std::unique_ptr<SoftPlcEngine> engine;
+	std::map<godot::String, SoftPlcTagEntry> tags;
+	std::string program_source;
+	int handle = 0;
+	bool bundle_loaded = false;
+	bool initialized = false;
+	uint64_t last_phys_frame = 0; // physics frame at last scan (0 = first); PLC time tracks SIM time
+
+	// Online-monitoring watch image: the worker fills it after each scan ONLY while a monitor is
+	// open (watch_enabled), the editor reads it on the main thread — guarded since a Dictionary is
+	// refcounted and crosses threads.
+	bool watch_enabled = false;
+	godot::Dictionary watch_image;
+	std::mutex watch_mutex;
 };
 
 static bool parse_tag_index(const godot::String &raw, std::string &out_base, int &out_index, bool &out_has_brackets) {
@@ -297,6 +325,11 @@ void OIPComms::cleanup_tag_group(const String &tag_group_name) {
 			}
 			delete tag_group.mqtt_impl;
 			tag_group.mqtt_impl = nullptr;
+		}
+	} else if (tag_group.protocol == "soft_plc") {
+		if (tag_group.soft_plc_impl != nullptr) {
+			delete tag_group.soft_plc_impl;
+			tag_group.soft_plc_impl = nullptr;
 		}
 	} else if (tag_group.protocol == "s7") {
 		for (auto &x : tag_group.plc_tags) {
@@ -567,6 +600,12 @@ if (tag_group.protocol == "opc_ua") {                                           
 	rtde_tag_set(write_req.tag_group_name, write_req.tag_name, write_req.value);    \
 } else if (tag_group.protocol == "mqtt") {                                          \
 	mqtt_tag_set_##a(write_req.tag_group_name, write_req.tag_name, write_req.value);\
+} else if (tag_group.protocol == "soft_plc") {                                      \
+	if (tag_group.soft_plc_impl != nullptr) {                                       \
+		auto _sit = tag_group.soft_plc_impl->tags.find(write_req.tag_name);         \
+		/* a part may write PLC inputs, never PLC outputs — the engine owns those */ \
+		if (_sit != tag_group.soft_plc_impl->tags.end() && !_sit->second.is_output) _sit->second.value = write_req.value; \
+	}                                                                               \
 } else if (tag_group.protocol == "s7") {                                            \
 		if (tag_pointer >= 0) S7_tag_set_##a(tag_pointer, write_req.value);         \
 }                                                                                   \
@@ -579,7 +618,8 @@ void OIPComms::process_write(const WriteRequest &write_req) {
 
 	int32_t tag_pointer = -1;
 	if (tag_group.protocol != "opc_ua" && tag_group.protocol != "ads"
-			&& tag_group.protocol != "rtde" && tag_group.protocol != "mqtt") {
+			&& tag_group.protocol != "rtde" && tag_group.protocol != "mqtt"
+			&& tag_group.protocol != "soft_plc") {
 		PlcTag &tag = tag_group.plc_tags[write_req.tag_name];
 		tag_pointer = tag.tag_pointer;
 	}
@@ -623,7 +663,8 @@ void OIPComms::process_write(const WriteRequest &write_req) {
 	// libplctag and S7 cache the value above; this issues the actual network write.
 	// opc_ua, ads, rtde, and mqtt write inline in their per-type set helpers.
 	if (tag_group.protocol != "opc_ua" && tag_group.protocol != "ads"
-			&& tag_group.protocol != "rtde" && tag_group.protocol != "mqtt") {
+			&& tag_group.protocol != "rtde" && tag_group.protocol != "mqtt"
+			&& tag_group.protocol != "soft_plc") {
 		if (tag_group.protocol == "s7"){
 			int s7_status = (tag_pointer >= 0) ? S7_tag_write(tag_pointer) : -1;
 			if (s7_status == 0) {
@@ -658,9 +699,164 @@ void OIPComms::process_tag_group(const String &tag_group_name) {
 		process_rtde_tag_group(tag_group_name);
 	} else if (tag_group.protocol == "mqtt") {
 		process_mqtt_tag_group(tag_group_name);
+	} else if (tag_group.protocol == "soft_plc") {
+		process_soft_plc_tag_group(tag_group_name);
 	} else {
 		process_plc_tag_group(tag_group_name);
 	}
+}
+
+// The soft_plc transport: run the embedded ST engine as a tag source/sink. Reads the program's input
+// tags (parts wrote them via write_*), scans, and writes the output tags (parts read them via
+// read_*). Runs on the worker thread, after the write queue is flushed, so the cache is consistent
+// and no lock is needed. The bundle path comes from the tag group's `gateway`; the ST program from
+// set_soft_plc_program() (the scene's oip_st_program metadata, scene-interop Phase 4a).
+void OIPComms::process_soft_plc_tag_group(const String &tag_group_name) {
+	TagGroup &tag_group = tag_groups[tag_group_name];
+	SoftPlcTagGroupImpl *impl = tag_group.soft_plc_impl;
+	if (impl == nullptr)
+		return;
+
+	if (!impl->initialized) {
+		if (impl->program_source.empty())
+			return; // no program yet — wait for set_soft_plc_program()
+		if (impl->engine == nullptr)
+			impl->engine = std::make_unique<SoftPlcEngine>();
+		if (!impl->bundle_loaded) {
+			Ref<FileAccess> f = FileAccess::open(tag_group.gateway, FileAccess::READ);
+			if (f.is_null()) {
+				print("soft_plc: cannot open bundle '" + tag_group.gateway + "'", true);
+				tag_group.has_error = true;
+				return;
+			}
+			String js = f->get_as_text();
+			if (!impl->engine->load_bundle(std::string(js.utf8().get_data()))) {
+				print("soft_plc: " + String(impl->engine->error().c_str()), true);
+				tag_group.has_error = true;
+				return;
+			}
+			impl->bundle_loaded = true;
+		}
+		impl->handle = impl->engine->create(impl->program_source);
+		if (impl->handle <= 0) {
+			print("soft_plc compile error: " + String(impl->engine->error().c_str()), true);
+			tag_group.has_error = true;
+			return;
+		}
+		// mark which registered tags are program INPUTS (from the program meta); the rest are outputs
+		Variant meta_v = JSON::parse_string(String(impl->engine->meta(impl->handle).c_str()));
+		if (meta_v.get_type() == Variant::DICTIONARY) {
+			Array ins = ((Dictionary)meta_v).get("inputs", Array());
+			for (int i = 0; i < ins.size(); i++) {
+				String n = ins[i];
+				auto it = impl->tags.find(n);
+				if (it != impl->tags.end())
+					it->second.is_input = true;
+			}
+			// Mark PLC outputs so a part can't clobber them (e.g. a conveyor whose running-feedback tag
+			// collides with its speed tag — both named the same — writing 1.0 over the engine's speed).
+			Array outs = ((Dictionary)meta_v).get("outputs", Array());
+			for (int i = 0; i < outs.size(); i++) {
+				String n = outs[i];
+				auto it = impl->tags.find(n);
+				if (it != impl->tags.end())
+					it->second.is_output = true;
+			}
+		}
+		impl->initialized = true;
+		impl->last_phys_frame = 0; // fresh program → restart the dt clock
+	}
+
+	Dictionary inputs;
+	for (auto &kv : impl->tags) {
+		if (kv.second.is_input && kv.second.value.get_type() != Variant::NIL)
+			inputs[kv.first] = kv.second.value;
+	}
+	String in_json = JSON::stringify(inputs);
+	// Advance the engine by SIMULATION time, not wall-clock — the box travels in physics, so the
+	// program's time-based logic (timers, travel tracking) must use the same clock or it drifts from
+	// the box (diverts fire late) whenever physics and wall-clock diverge (frame hitches, or physics
+	// not hitting its tick rate under load). dt = elapsed physics frames / ticks-per-second. First scan
+	// (or a restart, which resets last_phys_frame to 0) uses the nominal interval.
+	uint64_t phys_now = Engine::get_singleton()->get_physics_frames();
+	double tps = (double)Engine::get_singleton()->get_physics_ticks_per_second();
+	double dt = (impl->last_phys_frame == 0 || tps <= 0.0)
+			? tag_group.polling_interval / 1000.0
+			: (double)(phys_now - impl->last_phys_frame) / tps;
+	impl->last_phys_frame = phys_now;
+	String out_json = String(impl->engine->step(impl->handle, std::string(in_json.utf8().get_data()), dt).c_str());
+
+	Variant out_v = JSON::parse_string(out_json);
+	if (out_v.get_type() == Variant::DICTIONARY) {
+		Dictionary od = out_v;
+		Array keys = od.keys();
+		for (int i = 0; i < keys.size(); i++) {
+			String tag = keys[i];
+			auto it = impl->tags.find(tag);
+			if (it != impl->tags.end())
+				it->second.value = od[keys[i]];
+		}
+	}
+
+	// Online monitoring: when the editor has a monitor open, snapshot EVERY variable (not just the
+	// I/O tags) so it can show live inline values. Gated so there's no per-scan cost otherwise.
+	if (impl->watch_enabled) {
+		Variant watch_v = JSON::parse_string(String(impl->engine->watch(impl->handle).c_str()));
+		std::lock_guard<std::mutex> lock(impl->watch_mutex);
+		impl->watch_image = (watch_v.get_type() == Variant::DICTIONARY) ? Dictionary(watch_v) : Dictionary();
+	}
+}
+
+void OIPComms::set_soft_plc_program(const String p_tag_group_name, const String p_source) {
+	if (!tag_group_exists(p_tag_group_name))
+		return;
+	TagGroup &tag_group = tag_groups[p_tag_group_name];
+	if (tag_group.soft_plc_impl == nullptr)
+		tag_group.soft_plc_impl = new SoftPlcTagGroupImpl();
+	tag_group.soft_plc_impl->program_source = std::string(p_source.utf8().get_data());
+	tag_group.soft_plc_impl->initialized = false; // recompile on next poll
+}
+
+// Turn the per-scan watch snapshot on/off (an editor opens a monitor → on; closes / sim stops → off).
+void OIPComms::set_soft_plc_watch_enabled(const String p_tag_group_name, bool p_enabled) {
+	if (!tag_group_exists(p_tag_group_name))
+		return;
+	TagGroup &tag_group = tag_groups[p_tag_group_name];
+	if (tag_group.soft_plc_impl == nullptr)
+		tag_group.soft_plc_impl = new SoftPlcTagGroupImpl();
+	tag_group.soft_plc_impl->watch_enabled = p_enabled;
+}
+
+// Latest snapshot of every program variable (inputs, outputs, internals) for online monitoring.
+// Read on the main thread; the worker fills it under the same mutex.
+Dictionary OIPComms::get_soft_plc_watch(const String p_tag_group_name) {
+	if (!tag_group_exists(p_tag_group_name))
+		return Dictionary();
+	TagGroup &tag_group = tag_groups[p_tag_group_name];
+	if (tag_group.soft_plc_impl == nullptr)
+		return Dictionary();
+	std::lock_guard<std::mutex> lock(tag_group.soft_plc_impl->watch_mutex);
+	return tag_group.soft_plc_impl->watch_image; // CoW copy under lock = consistent snapshot
+}
+
+// Compile-check ST against the group's engine bundle WITHOUT touching the running engine (own
+// throwaway runtime, main-thread safe). Returns "" if it compiles, else the error message.
+String OIPComms::compile_soft_plc(const String p_tag_group_name, const String p_source) {
+	if (!tag_group_exists(p_tag_group_name))
+		return "tag group '" + p_tag_group_name + "' does not exist";
+	TagGroup &tag_group = tag_groups[p_tag_group_name];
+	Ref<FileAccess> f = FileAccess::open(tag_group.gateway, FileAccess::READ);
+	if (f.is_null())
+		return "cannot open bundle '" + tag_group.gateway + "'";
+	String js = f->get_as_text();
+	SoftPlcEngine eng;
+	if (!eng.load_bundle(std::string(js.utf8().get_data())))
+		return String(eng.error().c_str());
+	int h = eng.create(std::string(p_source.utf8().get_data()));
+	if (h <= 0)
+		return String(eng.error().c_str());
+	eng.destroy(h);
+	return "";
 }
 
 void OIPComms::process_plc_tag_group(const String &tag_group_name) {
@@ -1391,6 +1587,9 @@ bool OIPComms::tag_exists(const String& tag_group_name, const String& tag_name) 
 		} else if (tag_group.protocol == "mqtt") {
 			if (tag_group.mqtt_impl == nullptr) return false;
 			return tag_group.mqtt_impl->tags.find(tag_name) != tag_group.mqtt_impl->tags.end();
+		} else if (tag_group.protocol == "soft_plc") {
+			if (tag_group.soft_plc_impl == nullptr) return false;
+			return tag_group.soft_plc_impl->tags.find(tag_name) != tag_group.soft_plc_impl->tags.end();
 		} else {
 			return tag_group.plc_tags.find(tag_name) != tag_group.plc_tags.end();
 		}
@@ -1487,6 +1686,10 @@ void OIPComms::print(const Variant &message, bool error) {
 
 void OIPComms::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("register_tag_group", "tag_group_name", "polling_interval", "protocol", "gateway", "path", "cpu"), &OIPComms::register_tag_group);
+	ClassDB::bind_method(D_METHOD("set_soft_plc_program", "tag_group_name", "source"), &OIPComms::set_soft_plc_program);
+	ClassDB::bind_method(D_METHOD("set_soft_plc_watch_enabled", "tag_group_name", "enabled"), &OIPComms::set_soft_plc_watch_enabled);
+	ClassDB::bind_method(D_METHOD("get_soft_plc_watch", "tag_group_name"), &OIPComms::get_soft_plc_watch);
+	ClassDB::bind_method(D_METHOD("compile_soft_plc", "tag_group_name", "source"), &OIPComms::compile_soft_plc);
 	ClassDB::bind_method(D_METHOD("register_tag", "tag_group_name", "tag_name", "data_type"), &OIPComms::register_tag, DEFVAL(TAG_TYPE_BOOL));
 
 	ClassDB::bind_method(D_METHOD("set_enable_comms", "value"), &OIPComms::set_enable_comms);
@@ -1636,6 +1839,12 @@ bool OIPComms::register_tag(const String p_tag_group_name, const String p_tag_na
 				if (tag_group.mqtt_impl == nullptr)
 					tag_group.mqtt_impl = new MqttTagGroupImpl();
 				tag_group.mqtt_impl->tags[p_tag_name];
+			} else if (tag_group.protocol == "soft_plc") {
+				if (tag_group.soft_plc_impl == nullptr)
+					tag_group.soft_plc_impl = new SoftPlcTagGroupImpl();
+				SoftPlcTagEntry entry;
+				entry.data_type = p_data_type;
+				tag_group.soft_plc_impl->tags[p_tag_name] = entry;
 			} else {
 				int elem_count = 1;
 				if (tag_group.protocol == "modbus_tcp") {
@@ -2079,6 +2288,12 @@ Dictionary OIPComms::browse_node_info(const String p_node_id) {
 				b v;                                                              \
 				std::memcpy(&v, mtag.value.data(), sizeof(b));                    \
 				return v;                                                         \
+			} else if (tag_group.protocol == "soft_plc") {                        \
+				if (tag_group.soft_plc_impl == nullptr) return 0.0;               \
+				auto _sit = tag_group.soft_plc_impl->tags.find(p_tag_name);       \
+				if (_sit == tag_group.soft_plc_impl->tags.end()) return 0.0;      \
+				if (_sit->second.value.get_type() == Variant::NIL) return 0.0;    \
+				return (b)_sit->second.value;                                     \
 			} else if (tag_group.protocol == "s7") {                              \
 				PlcTag tag = tag_group.plc_tags[p_tag_name];                      \
 				if (tag.initialized) {                                            \

@@ -18,6 +18,7 @@
 struct AdsTagGroupImpl;
 struct RtdeTagGroupImpl;
 struct MqttTagGroupImpl;
+struct SoftPlcTagGroupImpl;
 
 namespace godot {
 
@@ -85,6 +86,10 @@ private:
 
 		MqttTagGroupImpl *mqtt_impl;
 
+		// Embedded ST runtime (the soft_plc transport). Default-initialised so register_tag_group's
+		// aggregate initialiser (which doesn't list it) leaves it null.
+		SoftPlcTagGroupImpl *soft_plc_impl = nullptr;
+
 		bool needs_session_recovered_signal = false;
 	};
 	std::map<String, TagGroup> tag_groups;
@@ -131,6 +136,7 @@ private:
 	void process_ads_tag_group(const String &tag_group_name);
 	void process_rtde_tag_group(const String &tag_group_name);
 	void process_mqtt_tag_group(const String &tag_group_name);
+	void process_soft_plc_tag_group(const String &tag_group_name);
 
 	bool init_plc_tag(const String &tag_group_name, const String &tag_name);
 
@@ -234,6 +240,14 @@ public:
 
 	void register_tag_group(const String p_tag_group_name, const int p_polling_interval, const String p_protocol, const String p_gateway, const String p_path, const String p_cpu);
 	bool register_tag(const String p_tag_group_name, const String p_tag_name, const int p_data_type);
+
+	// Set the Structured Text program for a soft_plc tag group (re-compiles on the next poll). The
+	// source typically comes from the scene's oip_st_program metadata (scene-interop Phase 4a).
+	void set_soft_plc_program(const String p_tag_group_name, const String p_source);
+	// Online monitoring + validation for a native ST editor (see oip-web docs/embedded-plc.md).
+	void set_soft_plc_watch_enabled(const String p_tag_group_name, bool p_enabled);
+	Dictionary get_soft_plc_watch(const String p_tag_group_name);
+	String compile_soft_plc(const String p_tag_group_name, const String p_source);
 
 	bool get_enable_comms();
 	void set_enable_comms(bool value);
