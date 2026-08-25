@@ -32,6 +32,8 @@ compile_commands.json
 bin/windows/*.dll
 bin/windows/*.lib
 demo/bin/windows/*.dll
+/bin/web/
+/demo/bin/web/
 
 # Binaries
 *.o
