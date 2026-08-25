@@ -39,10 +39,17 @@ env = SConscript("godot-cpp/SConstruct", {"env": env, "customs": customs})
 # and ADS's .cpp files must resolve to ads/AdsLib/Log.h. oip_comms.cpp still
 # finds MQTTClient.h here (no name collision). Paho's own .c files need the
 # reverse order, so they build with a cloned env (see paho_env below).
-env.Append(CPPPATH=["src/", "src/_scaffold/", "ads/AdsLib/", "paho/src/", "thirdparty/quickjs/"])
-env.Append(LIBPATH=["lib/"])
-env.Append(LIBS=["plctag", "open62541"])
-env.Append(CPPDEFINES=[("CONFIG_DEFAULT_LOGLEVEL", "1")])
+env.Append(CPPPATH=["src/"])
+
+if env["platform"] == "web":
+    # Browser transport: MQTT over WebSocket and the browser's own JS runtime
+    # for soft_plc. Raw PLC sockets and native QuickJS do not belong in wasm.
+    sources = ["src/oip_comms_web.cpp", "src/register_types.cpp"]
+else:
+    env.Append(CPPPATH=["src/_scaffold/", "ads/AdsLib/", "paho/src/", "thirdparty/quickjs/"])
+    env.Append(LIBPATH=["lib/"])
+    env.Append(LIBS=["plctag", "open62541"])
+    env.Append(CPPDEFINES=[("CONFIG_DEFAULT_LOGLEVEL", "1")])
 
 # With neither PAHO_MQTT_EXPORTS nor PAHO_MQTT_IMPORTS defined, Paho's
 # LIBMQTT_API expands to nothing, which is what we want when compiling its
@@ -85,7 +92,7 @@ if env["platform"] == "windows":
         ads_sources_dir = "ads/AdsLib/TwinCAT"
     else:
         print("ADS variant: standalone (TcAdsDll not found at " + beckhoff_ads_root + ")")
-else:
+elif env["platform"] != "web":
     env.Append(LINKFLAGS=["-static"])
 # Paho's .c files need paho/src/ FIRST so their internal "Log.h" wins over ADS's
 # (the reverse of the main env's order). The clone also isolates Paho-only defines.
@@ -101,11 +108,13 @@ if env["platform"] == "windows":
         "_WINSOCK_DEPRECATED_NO_WARNINGS",
     ])
 
-paho_objects = [
-    paho_env.SharedObject(str(node))
-    for node in Glob("paho/src/*.c")
-    if os.path.basename(str(node)) not in paho_sources_skip
-]
+paho_objects = []
+if env["platform"] != "web":
+    paho_objects = [
+        paho_env.SharedObject(str(node))
+        for node in Glob("paho/src/*.c")
+        if os.path.basename(str(node)) not in paho_sources_skip
+    ]
 
 # QuickJS-ng (C11, uses <stdatomic.h>) backs the soft_plc transport's embedded ST engine. Built with
 # a cloned env so its C11 flags don't touch paho's C sources. src/soft_plc.cpp (the C++ wrapper) is
@@ -114,25 +123,27 @@ qjs_env = env.Clone()
 if env["platform"] == "windows":
     qjs_env.Append(CFLAGS=["/MT", "/std:c11", "/experimental:c11atomics"])
     qjs_env.Append(CPPDEFINES=["_CRT_SECURE_NO_WARNINGS"])
-quickjs_objects = [
-    qjs_env.SharedObject(s)
-    for s in [
-        "thirdparty/quickjs/quickjs.c",
-        "thirdparty/quickjs/libregexp.c",
-        "thirdparty/quickjs/libunicode.c",
-        "thirdparty/quickjs/dtoa.c",
+quickjs_objects = []
+if env["platform"] != "web":
+    quickjs_objects = [
+        qjs_env.SharedObject(s)
+        for s in [
+            "thirdparty/quickjs/quickjs.c",
+            "thirdparty/quickjs/libregexp.c",
+            "thirdparty/quickjs/libunicode.c",
+            "thirdparty/quickjs/dtoa.c",
+        ]
     ]
-]
 
-sources = (
-    Glob("src/*.cpp")
-    + Glob("src/_scaffold/*.cpp")  # behavior-VM spike (behavior_engine + behavior_runtime)
-    + Glob("ads/AdsLib/*.cpp")
-    + Glob("ads/AdsLib/bhf/*.cpp")
-    + Glob(ads_sources_dir + "/*.cpp")
-    + paho_objects
-    + quickjs_objects
-)
+    sources = (
+        [node for node in Glob("src/*.cpp") if os.path.basename(str(node)) != "oip_comms_web.cpp"]
+        + Glob("src/_scaffold/*.cpp")  # behavior-VM spike (behavior_engine + behavior_runtime)
+        + Glob("ads/AdsLib/*.cpp")
+        + Glob("ads/AdsLib/bhf/*.cpp")
+        + Glob(ads_sources_dir + "/*.cpp")
+        + paho_objects
+        + quickjs_objects
+    )
 
 if env["target"] in ["editor", "template_debug"]:
     try:
