@@ -1,5 +1,10 @@
 # Open Industry Project - GDextension Component
+
+> [!IMPORTANT]
+> This is the communications plugin for the Godot version of Open Industry Project, and it is no longer maintained. Its successor runs in the browser and as a desktop app: try it at [openindustryproject.org](https://www.openindustryproject.org), or find the code at [Open-Industry-Project/Open-Industry-Project](https://github.com/Open-Industry-Project/Open-Industry-Project).
+
 This component is for the Open Industry Project (OIP). It exposes a single `OIPComms` singleton that drives multiple industrial-comms protocols through one unified read/write/poll API. Each tag group is registered with a `protocol` string that selects the backend.
+
 
 | `protocol` | Backend | Source |
 |------------|---------|--------|
